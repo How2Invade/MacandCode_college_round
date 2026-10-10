@@ -54,8 +54,8 @@ export class HeadTracker implements ITracker {
   
   private gestureMachine = new GestureStateMachine();
   
-  // Current jaw open score from most recent frame
-  private currentJawOpenScore = 0;
+  // Current blink score from most recent frame
+  private currentBlinkScore = 0;
 
   public latestGesture: string = 'None';
   public latestGestureOutput: GestureOutput | null = null;
@@ -181,7 +181,7 @@ export class HeadTracker implements ITracker {
           const rawPos = this.processPose();
           
           if (results.faceBlendshapes && results.faceBlendshapes.length > 0 && rawPos) {
-             this.currentJawOpenScore = this.extractJawOpenScore(results.faceBlendshapes[0].categories);
+             this.currentBlinkScore = this.extractBlinkScore(results.faceBlendshapes[0].categories);
           }
           
           this.status.confidence = 1;
@@ -196,7 +196,7 @@ export class HeadTracker implements ITracker {
         
         // Pass everything to the Gesture State Machine
         const input: GestureInput = {
-          jawOpenScore: this.currentJawOpenScore,
+          blinkScore: this.currentBlinkScore,
           relativeYawDeg: this.pose.relYaw,
           relativeRollDeg: this.pose.roll,
           trackingValid,
@@ -219,9 +219,9 @@ export class HeadTracker implements ITracker {
         }
         
         // Handle Action
-        if (output.action === 'MOUTH_CLICK') {
-           this.setLiveGesture('Mouth Click');
-           this.emitEvent({ timestamp: input.nowMs, mode: 'head', position: emitPos, gesture: 'mouth_open', confidence: 1 });
+        if (output.action === 'DOUBLE_BLINK') {
+           this.setLiveGesture('Double Blink Click');
+           this.emitEvent({ timestamp: input.nowMs, mode: 'head', position: emitPos, gesture: 'double_blink', confidence: 1 });
         } else if (output.action === 'TAB_LEFT') {
            this.setLiveGesture('Tab Left');
            this.emitEvent({ timestamp: input.nowMs, mode: 'head', position: emitPos, gesture: 'tab_left', confidence: 1 });
@@ -370,13 +370,19 @@ export class HeadTracker implements ITracker {
     return pos;
   }
 
-  private extractJawOpenScore(categories: any[]): number {
+  private extractBlinkScore(categories: any[]): number {
+    let left = 0;
+    let right = 0;
     for (const cat of categories) {
-      if (cat.categoryName === 'jawOpen') {
-        return cat.score;
+      if (cat.categoryName === 'eyeBlinkLeft') {
+        left = cat.score;
+      }
+      if (cat.categoryName === 'eyeBlinkRight') {
+        right = cat.score;
       }
     }
-    return 0;
+    // Require BOTH eyes to be closed (avoids winks)
+    return Math.min(left, right);
   }
 
   // End of old gestures

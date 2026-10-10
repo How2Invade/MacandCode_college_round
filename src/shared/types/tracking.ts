@@ -40,7 +40,7 @@ export type GestureType =
   | "tab_right"
   | "undo"
   | "redo"
-  | "mouth_open"
+  | "double_blink"
   | "dwell";
 
 export interface TrackingEvent {

@@ -8,7 +8,7 @@
  *
  * Priority order (highest wins):
  *  1. PAUSED / STOPPED — no actions.
- *  2. MOUTH_CLICK state machine.
+ *  2. DOUBLE_BLINK state machine.
  *  3. TAB_NAV state machine.
  *  4. Normal cursor movement.
  *
@@ -17,14 +17,16 @@
  * inputs and a fake clock.
  */
 
-// ─── Mouth-click states ────────────────────────────────────────────────────
+// ─── Double-Blink states ───────────────────────────────────────────────────
 
-export type MouthState =
+export type BlinkState =
   | 'IDLE'
-  | 'OPEN_PENDING'   // jaw crossed candidate threshold; cursor frozen; confirming
-  | 'CLICKED'        // click dispatched this frame
-  | 'CLOSE_REQUIRED' // waiting for jaw to drop below reset threshold
-  | 'COOLDOWN';      // post-click lockout
+  | 'BLINK_1_PENDING'   // blink crossed candidate threshold; cursor frozen
+  | 'WAITING_FOR_BLINK_2' // blink 1 ended, waiting for blink 2
+  | 'BLINK_2_PENDING'   // blink 2 started, confirming
+  | 'CLICKED'           // double blink confirmed, click dispatched
+  | 'CLOSE_REQUIRED'    // waiting for eyes to open after click
+  | 'COOLDOWN';         // post-click lockout
 
 // ─── Tab-navigation states ─────────────────────────────────────────────────
 
@@ -50,7 +52,7 @@ export type TiltState =
 
 export type GestureAction =
   | 'NONE'
-  | 'MOUTH_CLICK'
+  | 'DOUBLE_BLINK'
   | 'TAB_LEFT'
   | 'TAB_RIGHT'
   | 'UNDO'
@@ -61,16 +63,16 @@ export interface GestureOutput {
   action: GestureAction;
   /** Whether cursor position updates must be suppressed this frame. */
   freezeCursor: boolean;
-  /** Mouth-click state for UI diagnostics. */
-  mouthState: MouthState;
+  /** Blink state for UI diagnostics. */
+  blinkState: BlinkState;
   /** Tab-navigation state for UI diagnostics. */
   tabNavState: TabNavState;
   /** Tilt state for UI diagnostics. */
   tiltState: TiltState;
-  /** Live jaw-open score (0–1). */
-  jawOpenScore: number;
-  /** How far through the open-pending confirmation window (0–1). */
-  mouthProgress: number;
+  /** Live blink score (0–1). */
+  blinkScore: number;
+  /** How far through the click progress (0–1). */
+  clickProgress: number;
   /** Current gesture label for the live preview. */
   gestureLabel: string;
   /** Reason the last action was cancelled/failed, or empty string. */
@@ -80,14 +82,16 @@ export interface GestureOutput {
 // ─── Configuration (all tuneable without recompiling) ─────────────────────
 
 export interface GestureConfig {
-  /** Jaw-open score that starts OPEN_PENDING. Lower = more sensitive. */
-  mouthCandidateThreshold: number;
-  /** Jaw-open score required at end of confirmation window to fire click. */
-  mouthClickThreshold: number;
-  /** Jaw-open score below which mouth is considered closed (hysteresis). */
-  mouthResetThreshold: number;
+  /** Eye blink score that starts BLINK_PENDING. Lower = more sensitive. */
+  blinkCandidateThreshold: number;
+  /** Eye blink score required at end of confirmation window to fire click. */
+  blinkClickThreshold: number;
+  /** Eye blink score below which eyes are considered open (hysteresis). */
+  blinkResetThreshold: number;
   /** How many consecutive valid frames must stay above candidate threshold. */
-  mouthConfirmFrames: number;
+  blinkConfirmFrames: number;
+  /** Max time to wait for the second blink. */
+  doubleBlinkWindowMs: number;
   /** Post-click cooldown in ms before re-arming. */
   clickCooldownMs: number;
 
@@ -110,7 +114,7 @@ export interface GestureConfig {
   tiltCooldownMs: number;
 
   /** Master enable flags. */
-  mouthClickEnabled: boolean;
+  blinkClickEnabled: boolean;
   tabNavEnabled: boolean;
   tiltNavEnabled: boolean;
   /** Diagnostic preview: recognise gestures but don't fire actions. */
@@ -118,25 +122,26 @@ export interface GestureConfig {
 }
 
 export const DEFAULT_GESTURE_CONFIG: GestureConfig = {
-  mouthCandidateThreshold: 0.50, // start freezing cursor
-  mouthClickThreshold: 0.62,     // must reach here within confirm window
-  mouthResetThreshold: 0.25,     // must close this far before re-arming
-  mouthConfirmFrames: 4,         // ~4 frames @ 30fps ≈ 133ms
-  clickCooldownMs: 1000,
+  blinkCandidateThreshold: 0.25, // start freezing cursor
+  blinkClickThreshold: 0.30,     // must reach here within confirm window
+  blinkResetThreshold: 0.15,     // must open eyes this far to reset
+  blinkConfirmFrames: 1,         // ~1 frame for quick blinks (blinks are very fast)
+  doubleBlinkWindowMs: 800,      // wait up to 800ms for second blink
+  clickCooldownMs: 500,
 
   tabTurnThresholdDeg: 25,       // degrees from neutral to start pending
   tabTurnHoldThresholdDeg: 22,   // must stay above this during confirm
-  tabTurnConfirmMs: 380,         // ms to hold turn before switching
+  tabTurnConfirmMs: 300,         // ms to hold turn before switching
   tabNeutralBand: 12,            // degrees from neutral = "returned"
-  tabCooldownMs: 1200,
+  tabCooldownMs: 600,
 
   tiltThresholdDeg: 20,          // degrees from neutral to start pending
   tiltHoldThresholdDeg: 18,
-  tiltConfirmMs: 380,
+  tiltConfirmMs: 300,
   tiltNeutralBand: 10,
-  tiltCooldownMs: 1200,
+  tiltCooldownMs: 600,
 
-  mouthClickEnabled: true,
+  blinkClickEnabled: true,
   tabNavEnabled: true,
   tiltNavEnabled: true,
   previewOnly: false,
@@ -145,8 +150,8 @@ export const DEFAULT_GESTURE_CONFIG: GestureConfig = {
 // ─── Inputs passed to update() ─────────────────────────────────────────────
 
 export interface GestureInput {
-  /** Jaw-open blendshape score from MediaPipe (0–1). NaN = invalid frame. */
-  jawOpenScore: number;
+  /** Combined blink blendshape score from MediaPipe (0–1). NaN = invalid frame. */
+  blinkScore: number;
   /** Yaw relative to calibrated neutral, in degrees. + = right, − = left. */
   relativeYawDeg: number;
   /** Roll relative to calibrated neutral, in degrees. + = right, − = left. */
@@ -162,12 +167,13 @@ export interface GestureInput {
 export class GestureStateMachine {
   private cfg: GestureConfig;
 
-  // ── Mouth state ──
-  private mouthState: MouthState = 'IDLE';
-  private mouthConfirmCount = 0;
-  private peakJawScore = 0;
-  private mouthCooldownUntil = 0;
-  private lastJawScore = 0;
+  // ── Blink state ──
+  private blinkState: BlinkState = 'IDLE';
+  private blinkConfirmCount = 0;
+  private peakBlinkScore = 0;
+  private blinkCooldownUntil = 0;
+  private doubleBlinkTimeoutUntil = 0;
+  private lastBlinkScore = 0;
 
   // ── Tab-nav state ──
   private tabNavState: TabNavState = 'NEUTRAL';
@@ -185,11 +191,11 @@ export class GestureStateMachine {
   private lastOutput: GestureOutput = {
     action: 'NONE',
     freezeCursor: false,
-    mouthState: 'IDLE',
+    blinkState: 'IDLE',
     tabNavState: 'NEUTRAL',
     tiltState: 'NEUTRAL',
-    jawOpenScore: 0,
-    mouthProgress: 0,
+    blinkScore: 0,
+    clickProgress: 0,
     gestureLabel: 'None',
     cancelReason: '',
   };
@@ -212,7 +218,7 @@ export class GestureStateMachine {
   /** Pause — freezes all actions and resets pending states. */
   public pause(): void {
     this.paused = true;
-    this.cancelMouth('Paused');
+    this.cancelBlink('Paused');
     this.cancelTabNav('Paused');
     this.cancelTilt('Paused');
   }
@@ -234,9 +240,9 @@ export class GestureStateMachine {
    * The caller must execute output.action exactly once.
    */
   public update(input: GestureInput): GestureOutput {
-    const { nowMs, trackingValid, jawOpenScore, relativeYawDeg } = input;
+    const { nowMs, trackingValid, blinkScore, relativeYawDeg } = input;
 
-    this.lastJawScore = jawOpenScore;
+    this.lastBlinkScore = blinkScore;
 
     // ── 1. Safety: paused or invalid tracking ────────────────────────────
     if (this.paused) {
@@ -245,8 +251,8 @@ export class GestureStateMachine {
 
     if (!trackingValid) {
       // Cancel anything pending
-      if (this.mouthState !== 'IDLE' && this.mouthState !== 'COOLDOWN') {
-        this.cancelMouth('Tracking lost');
+      if (this.blinkState !== 'IDLE' && this.blinkState !== 'COOLDOWN') {
+        this.cancelBlink('Tracking lost');
       }
       if (
         this.tabNavState !== 'NEUTRAL' &&
@@ -263,126 +269,154 @@ export class GestureStateMachine {
       return this.emit('NONE', false, 0, '', nowMs);
     }
 
-    const validJaw = Number.isFinite(jawOpenScore) && jawOpenScore >= 0;
+    const validBlink = Number.isFinite(blinkScore) && blinkScore >= 0;
 
-    // ── 2. Mouth-click state machine ─────────────────────────────────────
-    let mouthAction: GestureAction = 'NONE';
-    let freezeForMouth = false;
-    let mouthProgress = 0;
+    // ── 2. Double-blink state machine ────────────────────────────────────
+    let blinkAction: GestureAction = 'NONE';
+    let freezeForBlink = false;
+    let blinkProgress = 0;
 
-    if (this.cfg.mouthClickEnabled) {
-      const result = this.stepMouth(validJaw ? jawOpenScore : 0, nowMs);
-      mouthAction = result.action;
-      freezeForMouth = result.freeze;
-      mouthProgress = result.progress;
+    if (this.cfg.blinkClickEnabled) {
+      const result = this.stepBlink(validBlink ? blinkScore : 0, nowMs);
+      blinkAction = result.action;
+      freezeForBlink = result.freeze;
+      blinkProgress = result.progress;
     }
 
-    // ── 3. Tab-nav state machine (only runs if mouth is not active) ──────
+    // ── 3. Tab-nav state machine (only runs if blink is not active) ──────
     let tabAction: GestureAction = 'NONE';
     let freezeForTab = false;
 
-    if (this.cfg.tabNavEnabled && mouthAction === 'NONE' && !freezeForMouth) {
+    if (this.cfg.tabNavEnabled && blinkAction === 'NONE' && !freezeForBlink) {
       const result = this.stepTabNav(relativeYawDeg, nowMs);
       tabAction = result.action;
       freezeForTab = result.freeze;
-    } else if (freezeForMouth) {
-      // Mouth is pending — also suppress tab detection to avoid interference
-      this.cancelTabNav('Mouth gesture active');
+    } else if (freezeForBlink) {
+      // Blink is pending — also suppress tab detection to avoid interference
+      this.cancelTabNav('Blink gesture active');
     }
 
-    // ── 3.5. Tilt state machine (runs if mouth and tab are not active) ──
+    // ── 3.5. Tilt state machine (runs if blink and tab are not active) ──
     let tiltAction: GestureAction = 'NONE';
     let freezeForTilt = false;
 
-    if (this.cfg.tiltNavEnabled && mouthAction === 'NONE' && !freezeForMouth && tabAction === 'NONE' && !freezeForTab) {
+    if (this.cfg.tiltNavEnabled && blinkAction === 'NONE' && !freezeForBlink && tabAction === 'NONE' && !freezeForTab) {
       const result = this.stepTilt(input.relativeRollDeg, nowMs);
       tiltAction = result.action;
       freezeForTilt = result.freeze;
-    } else if (freezeForMouth || freezeForTab) {
+    } else if (freezeForBlink || freezeForTab) {
       this.cancelTilt('Higher priority gesture active');
     }
 
     // ── 4. Arbitration: exactly one action ───────────────────────────────
     let finalAction: GestureAction = 'NONE';
-    if (mouthAction !== 'NONE') finalAction = mouthAction;
+    if (blinkAction !== 'NONE') finalAction = blinkAction;
     else if (tabAction !== 'NONE') finalAction = tabAction;
     else if (tiltAction !== 'NONE') finalAction = tiltAction;
 
-    const freezeCursor = freezeForMouth || freezeForTab || freezeForTilt;
+    const freezeCursor = freezeForBlink || freezeForTab || freezeForTilt;
 
-    return this.emit(finalAction, freezeCursor, mouthProgress, '', nowMs);
+    return this.emit(finalAction, freezeCursor, blinkProgress, '', nowMs);
   }
 
-  // ─── Mouth sub-machine ───────────────────────────────────────────────────
+  // ─── Double Blink sub-machine ────────────────────────────────────────────
 
-  private stepMouth(
-    jaw: number,
+  private stepBlink(
+    val: number,
     nowMs: number
   ): { action: GestureAction; freeze: boolean; progress: number } {
-    const { mouthState } = this;
+    const { blinkState } = this;
 
-    switch (mouthState) {
+    switch (blinkState) {
       case 'IDLE': {
-        if (jaw >= this.cfg.mouthCandidateThreshold) {
-          this.mouthState = 'OPEN_PENDING';
-          this.mouthConfirmCount = 1;
-          this.peakJawScore = jaw;
+        if (val >= this.cfg.blinkCandidateThreshold) {
+          this.blinkState = 'BLINK_1_PENDING';
+          this.blinkConfirmCount = 1;
+          this.peakBlinkScore = val;
         }
         return { action: 'NONE', freeze: false, progress: 0 };
       }
 
-      case 'OPEN_PENDING': {
-        if (jaw < this.cfg.mouthCandidateThreshold) {
-          // Dropped below candidate — cancelled
-          this.cancelMouth('Mouth closed before confirmation');
+      case 'BLINK_1_PENDING': {
+        if (val < this.cfg.blinkCandidateThreshold) {
+          // Blink was too short or cancelled
+          if (this.blinkConfirmCount >= this.cfg.blinkConfirmFrames && this.peakBlinkScore >= this.cfg.blinkClickThreshold) {
+             // Valid blink 1 completed!
+             this.blinkState = 'WAITING_FOR_BLINK_2';
+             this.doubleBlinkTimeoutUntil = nowMs + this.cfg.doubleBlinkWindowMs;
+             // DO NOT freeze during the wait, so natural single blinks don't freeze the cursor!
+             return { action: 'NONE', freeze: false, progress: 0.5 };
+          }
+          this.cancelBlink('Blink 1 too short');
           return { action: 'NONE', freeze: false, progress: 0 };
         }
 
-        this.mouthConfirmCount++;
-        this.peakJawScore = Math.max(this.peakJawScore, jaw);
+        this.blinkConfirmCount++;
+        this.peakBlinkScore = Math.max(this.peakBlinkScore, val);
 
-        const progress = Math.min(
-          1,
-          this.mouthConfirmCount / this.cfg.mouthConfirmFrames
-        );
+        return { action: 'NONE', freeze: true, progress: 0.25 };
+      }
 
-        if (
-          this.mouthConfirmCount >= this.cfg.mouthConfirmFrames &&
-          this.peakJawScore >= this.cfg.mouthClickThreshold
-        ) {
-          // Confirmed — fire click
-          this.mouthState = 'CLICKED';
-          return { action: 'NONE', freeze: true, progress: 1 };
+      case 'WAITING_FOR_BLINK_2': {
+        if (nowMs > this.doubleBlinkTimeoutUntil) {
+          this.cancelBlink('Timeout waiting for Blink 2');
+          return { action: 'NONE', freeze: false, progress: 0 };
+        }
+        
+        if (val >= this.cfg.blinkCandidateThreshold) {
+          // Blink 2 started
+          this.blinkState = 'BLINK_2_PENDING';
+          this.blinkConfirmCount = 1;
+          this.peakBlinkScore = val;
+          return { action: 'NONE', freeze: true, progress: 0.75 };
         }
 
-        // Still accumulating
-        return { action: 'NONE', freeze: true, progress };
+        return { action: 'NONE', freeze: false, progress: 0.5 };
+      }
+      
+      case 'BLINK_2_PENDING': {
+        if (val < this.cfg.blinkCandidateThreshold) {
+          if (this.blinkConfirmCount >= this.cfg.blinkConfirmFrames && this.peakBlinkScore >= this.cfg.blinkClickThreshold) {
+             this.blinkState = 'CLICKED';
+             return { action: 'NONE', freeze: true, progress: 1 };
+          }
+          this.cancelBlink('Blink 2 too short');
+          return { action: 'NONE', freeze: false, progress: 0 };
+        }
+
+        this.blinkConfirmCount++;
+        this.peakBlinkScore = Math.max(this.peakBlinkScore, val);
+
+        if (this.blinkConfirmCount >= this.cfg.blinkConfirmFrames && this.peakBlinkScore >= this.cfg.blinkClickThreshold) {
+             this.blinkState = 'CLICKED';
+             return { action: 'NONE', freeze: true, progress: 1 };
+        }
+        
+        return { action: 'NONE', freeze: true, progress: 0.75 };
       }
 
       case 'CLICKED': {
-        // Emit the click action this frame, then move to CLOSE_REQUIRED
-        this.mouthState = 'CLOSE_REQUIRED';
-        this.mouthCooldownUntil = nowMs + this.cfg.clickCooldownMs;
+        this.blinkState = 'CLOSE_REQUIRED';
+        this.blinkCooldownUntil = nowMs + this.cfg.clickCooldownMs;
 
         const action: GestureAction = this.cfg.previewOnly
           ? 'NONE'
-          : 'MOUTH_CLICK';
+          : 'DOUBLE_BLINK';
         return { action, freeze: true, progress: 1 };
       }
 
       case 'CLOSE_REQUIRED': {
-        if (jaw <= this.cfg.mouthResetThreshold) {
-          this.mouthState = 'COOLDOWN';
+        if (val <= this.cfg.blinkResetThreshold) {
+          this.blinkState = 'COOLDOWN';
         }
-        // Keep cursor frozen until cooldown too
         return { action: 'NONE', freeze: true, progress: 1 };
       }
 
       case 'COOLDOWN': {
-        if (nowMs >= this.mouthCooldownUntil) {
-          this.mouthState = 'IDLE';
-          this.mouthConfirmCount = 0;
-          this.peakJawScore = 0;
+        if (nowMs >= this.blinkCooldownUntil) {
+          this.blinkState = 'IDLE';
+          this.blinkConfirmCount = 0;
+          this.peakBlinkScore = 0;
         }
         return { action: 'NONE', freeze: false, progress: 0 };
       }
@@ -585,11 +619,11 @@ export class GestureStateMachine {
 
   // ─── Helpers ─────────────────────────────────────────────────────────────
 
-  private cancelMouth(reason: string): void {
+  private cancelBlink(reason: string): void {
     this.lastOutput = { ...this.lastOutput, cancelReason: reason };
-    this.mouthState = 'IDLE';
-    this.mouthConfirmCount = 0;
-    this.peakJawScore = 0;
+    this.blinkState = 'IDLE';
+    this.blinkConfirmCount = 0;
+    this.peakBlinkScore = 0;
   }
 
   private cancelTabNav(reason: string): void {
@@ -617,10 +651,10 @@ export class GestureStateMachine {
   }
 
   private resetAll(): void {
-    this.mouthState = 'IDLE';
-    this.mouthConfirmCount = 0;
-    this.peakJawScore = 0;
-    this.mouthCooldownUntil = 0;
+    this.blinkState = 'IDLE';
+    this.blinkConfirmCount = 0;
+    this.peakBlinkScore = 0;
+    this.blinkCooldownUntil = 0;
     
     this.tabNavState = 'NEUTRAL';
     this.turnStartMs = 0;
@@ -634,10 +668,12 @@ export class GestureStateMachine {
   }
 
   private gestureLabel(_action: GestureAction, freeze: boolean): string {
-    if (this.mouthState === 'OPEN_PENDING') return 'Mouth Pending…';
-    if (this.mouthState === 'CLICKED' || this.mouthState === 'CLOSE_REQUIRED')
-      return '✓ Mouth Click';
-    if (this.mouthState === 'COOLDOWN') return 'Cooldown';
+    if (this.blinkState === 'BLINK_1_PENDING') return 'Blink Pending…';
+    if (this.blinkState === 'WAITING_FOR_BLINK_2') return 'Waiting for Blink 2…';
+    if (this.blinkState === 'BLINK_2_PENDING') return 'Blink 2 Pending…';
+    if (this.blinkState === 'CLICKED' || this.blinkState === 'CLOSE_REQUIRED')
+      return '✓ Double Blink Click';
+    if (this.blinkState === 'COOLDOWN') return 'Cooldown';
     
     if (this.tabNavState === 'TURN_LEFT_PENDING') return 'Turn Left Pending…';
     if (this.tabNavState === 'TURN_RIGHT_PENDING') return 'Turn Right Pending…';
@@ -665,11 +701,11 @@ export class GestureStateMachine {
     const out: GestureOutput = {
       action,
       freezeCursor,
-      mouthState: this.mouthState,
+      blinkState: this.blinkState,
       tabNavState: this.tabNavState,
       tiltState: this.tiltState,
-      jawOpenScore: this.lastJawScore,
-      mouthProgress,
+      blinkScore: this.lastBlinkScore,
+      clickProgress: mouthProgress,
       gestureLabel: this.gestureLabel(action, freezeCursor),
       cancelReason: cancelReason || this.lastOutput.cancelReason,
     };

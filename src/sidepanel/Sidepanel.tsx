@@ -61,7 +61,7 @@ export const Sidepanel: React.FC = () => {
   const [currentActionDescription, setCurrentActionDescription] = useState<string>('Ready for motion or voice inputs');
   const [pendingApproval, setPendingApproval] = useState<BrowserAction | null>(null);
   const [gestureActionsEnabled, setGestureActionsEnabled] = useState<boolean>(false);
-  const [mouthClickEnabled, setMouthClickEnabled] = useState<boolean>(true);
+  const [blinkClickEnabled, setBlinkClickEnabled] = useState<boolean>(true);
   const [tabNavEnabled, setTabNavEnabled] = useState<boolean>(true);
   const [tiltNavEnabled, setTiltNavEnabled] = useState<boolean>(true);
   const [previewOnly, setPreviewOnly] = useState<boolean>(false);
@@ -113,7 +113,7 @@ export const Sidepanel: React.FC = () => {
         const dContent = document.getElementById('diag-content');
         const dGesture = document.getElementById('diag-gesture');
         const dJaw = document.getElementById('diag-jaw');
-        const dMouthState = document.getElementById('diag-mouth-state');
+        const dMouthState = document.getElementById('diag-blink-state');
         const dTabState = document.getElementById('diag-tab-state');
         
         if (dRelYaw) dRelYaw.innerText = (headTracker.pose.relYaw || 0).toFixed(2);
@@ -121,8 +121,8 @@ export const Sidepanel: React.FC = () => {
         if (dX) dX.innerText = (headTracker.pose.targetX || 0).toFixed(2);
         if (dY) dY.innerText = (headTracker.pose.targetY || 0).toFixed(2);
         if (dGesture) dGesture.innerText = headTracker.latestGestureOutput?.gestureLabel || 'None';
-        if (dJaw) dJaw.innerText = (headTracker.latestGestureOutput?.jawOpenScore || 0).toFixed(2);
-        if (dMouthState) dMouthState.innerText = headTracker.latestGestureOutput?.mouthState || 'IDLE';
+        if (dJaw) dJaw.innerText = (headTracker.latestGestureOutput?.blinkScore || 0).toFixed(2);
+        if (dMouthState) dMouthState.innerText = headTracker.latestGestureOutput?.blinkState || 'IDLE';
         if (dTabState) dTabState.innerText = headTracker.latestGestureOutput?.tabNavState || 'NEUTRAL';
         if (dCtrl) dCtrl.innerText = String(cursorController.diagnostics.receivedUpdates);
         if (dContent) {
@@ -213,10 +213,10 @@ export const Sidepanel: React.FC = () => {
     cursorController.gestureActionsEnabled = newState;
   };
 
-  const handleToggleMouthClick = () => {
-    const newState = !mouthClickEnabled;
-    setMouthClickEnabled(newState);
-    headTracker.configureGestures({ mouthClickEnabled: newState });
+  const handleToggleBlinkClick = () => {
+    const newState = !blinkClickEnabled;
+    setBlinkClickEnabled(newState);
+    headTracker.configureGestures({ blinkClickEnabled: newState });
   };
 
   const handleToggleTabNav = () => {
@@ -407,8 +407,8 @@ export const Sidepanel: React.FC = () => {
                 <span id="diag-gesture" className="text-white">None</span>
              </div>
              <div className="flex justify-between">
-                <span>Mouth State: <span id="diag-mouth-state" className="text-white">IDLE</span></span>
-                <span>Jaw: <span id="diag-jaw" className="text-white">0.00</span></span>
+                <span>Blink State: <span id="diag-blink-state" className="text-white">IDLE</span></span>
+                <span>Blink: <span id="diag-jaw" className="text-white">0.00</span></span>
              </div>
              <div className="flex justify-between border-b border-slate-800 pb-1 mb-1">
                 <span>Tab State: <span id="diag-tab-state" className="text-white">NEUTRAL</span></span>
@@ -504,8 +504,8 @@ export const Sidepanel: React.FC = () => {
             <span>Preview Mode (No click/tab)</span>
           </label>
           <label className="flex items-center space-x-1 cursor-pointer bg-slate-800/80 p-1.5 rounded border border-slate-700/60">
-            <input type="checkbox" className="accent-indigo-500" checked={mouthClickEnabled} onChange={handleToggleMouthClick} />
-            <span>Mouth Click</span>
+            <input type="checkbox" className="accent-indigo-500" checked={blinkClickEnabled} onChange={handleToggleBlinkClick} />
+            <span>Double Blink (Click)</span>
           </label>
           <label className="flex items-center space-x-1 cursor-pointer bg-slate-800/80 p-1.5 rounded border border-slate-700/60">
             <input type="checkbox" className="accent-indigo-500" checked={tabNavEnabled} onChange={handleToggleTabNav} />
