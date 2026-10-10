@@ -2,7 +2,7 @@ import { PointerPosition } from '../shared/types/tracking';
 import { ICursorController } from './mockCursorController';
 
 export class WebpageCursorController implements ICursorController {
-  public isVisible = false;
+  private isVisible = false;
   private container: HTMLDivElement | null = null;
   private cursorElement: HTMLDivElement | null = null;
   private shadowRoot: ShadowRoot | null = null;
@@ -13,11 +13,12 @@ export class WebpageCursorController implements ICursorController {
   private pendingY: number | null = null;
 
   constructor() {
-    this.initDOM();
+    // Lazily initialize DOM when needed to prevent issues on early script injection
   }
 
   private initDOM() {
     if (this.container) return; // already initialized
+    if (!document.body) return; // Wait until body is available
     
     // Create shadow host to protect styling
     this.container = document.createElement('div');
@@ -25,8 +26,8 @@ export class WebpageCursorController implements ICursorController {
     this.container.style.position = 'fixed';
     this.container.style.top = '0';
     this.container.style.left = '0';
-    this.container.style.bottom = '0';
-    this.container.style.right = '0';
+    this.container.style.width = '100vw';
+    this.container.style.height = '100vh';
     this.container.style.pointerEvents = 'none'; // pass-through clicks
     this.container.style.zIndex = '2147483647'; // max z-index
     this.container.style.display = 'none';
@@ -47,14 +48,9 @@ export class WebpageCursorController implements ICursorController {
     this.cursorElement.style.transition = 'transform 0.05s linear'; // slight smoothing
     
     this.shadowRoot.appendChild(this.cursorElement);
-    if (document.documentElement) {
-      document.documentElement.appendChild(this.container);
-    } else {
-      document.body.appendChild(this.container);
-    }
+    document.body.appendChild(this.container);
     
-    // Cleanup on window unload just in case
-    window.addEventListener('unload', () => this.destroy());
+    // DOM elements are automatically destroyed when the window unloads
   }
 
   private renderLoop = () => {
@@ -73,6 +69,10 @@ export class WebpageCursorController implements ICursorController {
   public moveTo(pos: PointerPosition): void {
     // Validate inputs
     if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y)) return;
+    
+    if (!this.isVisible) {
+      this.show();
+    }
     
     this.pendingX = Math.max(0, Math.min(1, pos.x));
     this.pendingY = Math.max(0, Math.min(1, pos.y));

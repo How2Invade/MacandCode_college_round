@@ -17,7 +17,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === 'CONTENT_PING') {
       sendResponse({ status: 'pong', url: window.location.href });
-      return;
+      return true;
     }
 
     if (message.type === 'POINTER_VISIBILITY') {
@@ -27,18 +27,14 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
         cursorController.hide();
       }
       sendResponse({ ok: true });
-      return;
+      return true;
     }
 
     if (message.type === 'POINTER_POSITION_UPDATE') {
       const pos = message.payload as PointerPosition;
-      // Auto-show if a position update arrives while hidden (handles page refreshes)
-      if (!cursorController.isVisible) {
-        cursorController.show();
-      }
       cursorController.moveTo(pos);
       sendResponse({ ok: true });
-      return;
+      return true;
     }
 
     if (message.type === 'EXECUTE_BROWSER_ACTION') {
@@ -52,9 +48,9 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
       };
 
       sendResponse(result);
-      return;
+      return true;
     }
 
-    return false;
+    return true;
   });
 }

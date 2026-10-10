@@ -32,8 +32,7 @@ export class SharedCursorController {
   public diagnostics = {
     receivedUpdates: 0,
     contentDeliverySuccess: 0,
-    contentDeliveryFail: 0,
-    lastDeliveryError: ''
+    contentDeliveryFail: 0
   };
   
   private unsubPointer: (() => void) | null = null;
@@ -186,12 +185,10 @@ export class SharedCursorController {
           chrome.tabs.sendMessage(tabs[0].id, { type: 'POINTER_POSITION_UPDATE', payload: smoothedPos }, (response) => {
              if (chrome.runtime.lastError) {
                 this.diagnostics.contentDeliveryFail++;
-                this.diagnostics.lastDeliveryError = chrome.runtime.lastError.message || 'Unknown error';
              } else if (response?.ok) {
                 this.diagnostics.contentDeliverySuccess++;
              } else {
                 this.diagnostics.contentDeliveryFail++;
-                this.diagnostics.lastDeliveryError = 'No response or not ok';
              }
           });
         }

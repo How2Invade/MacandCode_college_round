@@ -7,7 +7,6 @@ import {
 } from '../../shared/types/tracking';
 import { logger } from '../../shared/utils';
 import { FaceLandmarker, FilesetResolver, DrawingUtils } from '@mediapipe/tasks-vision';
-import { OneEuroFilter } from '../../shared/utils/oneEuroFilter';
 
 // A curated, deliberately sparse semantic mesh following natural facial contours
 const SPARSE_MESH_CONNECTIONS = [{"start":71,"end":68},{"start":68,"end":104},{"start":104,"end":69},{"start":69,"end":108},{"start":108,"end":151},{"start":151,"end":337},{"start":337,"end":299},{"start":299,"end":333},{"start":333,"end":298},{"start":298,"end":301},{"start":162,"end":21},{"start":21,"end":54},{"start":54,"end":103},{"start":103,"end":67},{"start":67,"end":109},{"start":109,"end":10},{"start":10,"end":338},{"start":338,"end":297},{"start":297,"end":332},{"start":332,"end":284},{"start":284,"end":251},{"start":251,"end":389},{"start":116,"end":143},{"start":143,"end":227},{"start":227,"end":234},{"start":234,"end":127},{"start":127,"end":162},{"start":50,"end":117},{"start":117,"end":118},{"start":118,"end":119},{"start":119,"end":120},{"start":120,"end":100},{"start":345,"end":372},{"start":372,"end":447},{"start":447,"end":454},{"start":454,"end":356},{"start":356,"end":389},{"start":280,"end":346},{"start":346,"end":347},{"start":347,"end":348},{"start":348,"end":349},{"start":349,"end":329}];
@@ -41,7 +40,6 @@ export class HeadTracker implements ITracker {
   private sensitivity = 2.5;
   private smoothing = 0.8;
   private deadzone = 0.02;
-  public useExperimentalAcceleration = false;
   
   // State
   private lastX = 0.5;
@@ -52,11 +50,6 @@ export class HeadTracker implements ITracker {
   private isCalibrated = false;
   private neutralPitch = 0;
   private neutralYaw = 0;
-  
-  // Smoothing & Filtering
-  private pitchFilter = new OneEuroFilter(60, 0.01, 5.0, 0.7);
-  private yawFilter = new OneEuroFilter(60, 0.01, 5.0, 0.7);
-  private rollFilter = new OneEuroFilter(60, 0.01, 5.0, 0.7);
   
   // Dwell
   private dwellStartTime = 0;
@@ -222,11 +215,11 @@ export class HeadTracker implements ITracker {
     let yaw = Math.atan2(-r20, Math.sqrt(r21 * r21 + r22 * r22)) * 180 / Math.PI;
     let roll = Math.atan2(r10, r00) * 180 / Math.PI;
     
-    // Smooth using OneEuroFilter (performance.now() for timestamp)
-    const timestamp = performance.now() / 1000;
-    this.pose.pitch = this.pitchFilter.filter(pitch, timestamp);
-    this.pose.yaw = this.yawFilter.filter(yaw, timestamp);
-    this.pose.roll = this.rollFilter.filter(roll, timestamp);
+    // Mild smoothing for display
+    const alpha = 0.5;
+    this.pose.pitch = this.pose.pitch * alpha + pitch * (1 - alpha);
+    this.pose.yaw = this.pose.yaw * alpha + yaw * (1 - alpha);
+    this.pose.roll = this.pose.roll * alpha + roll * (1 - alpha);
     this.pose.hasMatrix = true;
   }
 
@@ -292,22 +285,10 @@ export class HeadTracker implements ITracker {
     const currentPitch = this.pose.pitch;
 
     // Relative movement from neutral position (mirrored horizontally)
-    let diffYaw = -(currentYaw - this.neutralYaw);
-    let diffPitch = (currentPitch - this.neutralPitch);
-
-    let deltaX = 0;
-    let deltaY = 0;
-
-    if (this.useExperimentalAcceleration) {
-      // Experimental: Tracky Mouse-style non-linear acceleration curve
-      const accelFactor = 1.2;
-      deltaX = Math.sign(diffYaw) * (Math.abs(diffYaw) ** accelFactor) / 30 * this.sensitivity;
-      deltaY = Math.sign(diffPitch) * (Math.abs(diffPitch) ** accelFactor) / 20 * this.sensitivity;
-    } else {
-      // Baseline: Absolute linear mapping (scaled to normalized [0, 1] screen space)
-      deltaX = diffYaw / 30 * this.sensitivity;
-      deltaY = diffPitch / 20 * this.sensitivity;
-    }
+    // Scale the degrees to normalized [0, 1] screen space coordinates
+    // We assume roughly +/- 30 degrees for full horizontal motion, +/- 20 degrees for vertical
+    let deltaX = -(currentYaw - this.neutralYaw) / 30 * this.sensitivity;
+    let deltaY = (currentPitch - this.neutralPitch) / 20 * this.sensitivity;
 
     // Apply Deadzone
     if (Math.abs(deltaX) < this.deadzone) deltaX = 0;

@@ -20,6 +20,7 @@ describe('WebpageCursorController', () => {
   });
 
   it('creates exactly one visible cursor container in the body', () => {
+    cursor.show();
     const containers = document.querySelectorAll('#handsfree-cursor-host');
     expect(containers.length).toBe(1);
     
@@ -31,13 +32,16 @@ describe('WebpageCursorController', () => {
   });
 
   it('hides and shows the cursor correctly', () => {
+    // Before calling show, container does not exist
+    const containerBefore = document.getElementById('handsfree-cursor-host');
+    expect(containerBefore).toBeNull();
+    
+    cursor.show();
     const container = document.getElementById('handsfree-cursor-host');
     expect(container).not.toBeNull();
     
-    // Initially hidden
-    expect(container!.style.display).toBe('none');
-    
-    cursor.show();
+    // Now visible
+    expect(container!.style.display).toBe('block');
     expect(container!.style.display).toBe('block');
     
     cursor.hide();

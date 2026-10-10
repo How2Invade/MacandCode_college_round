@@ -112,12 +112,7 @@ export const Sidepanel: React.FC = () => {
         if (dX) dX.innerText = (headTracker.pose.targetX || 0).toFixed(2);
         if (dY) dY.innerText = (headTracker.pose.targetY || 0).toFixed(2);
         if (dCtrl) dCtrl.innerText = String(cursorController.diagnostics.receivedUpdates);
-        if (dContent) {
-           dContent.innerText = `${cursorController.diagnostics.contentDeliverySuccess} OK / ${cursorController.diagnostics.contentDeliveryFail} FAIL`;
-           if (cursorController.diagnostics.lastDeliveryError) {
-             dContent.innerText += ` [${cursorController.diagnostics.lastDeliveryError}]`;
-           }
-        }
+        if (dContent) dContent.innerText = `${cursorController.diagnostics.contentDeliverySuccess} OK / ${cursorController.diagnostics.contentDeliveryFail} FAIL`;
       }
       rafId = requestAnimationFrame(updateDiagnostics);
     };
