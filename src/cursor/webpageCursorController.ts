@@ -2,7 +2,7 @@ import { PointerPosition } from '../shared/types/tracking';
 import { ICursorController } from './mockCursorController';
 
 export class WebpageCursorController implements ICursorController {
-  private isVisible = false;
+  public isVisible = false;
   private container: HTMLDivElement | null = null;
   private cursorElement: HTMLDivElement | null = null;
   private shadowRoot: ShadowRoot | null = null;

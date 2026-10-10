@@ -32,6 +32,10 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
 
     if (message.type === 'POINTER_POSITION_UPDATE') {
       const pos = message.payload as PointerPosition;
+      // Auto-show if a position update arrives while hidden (handles page refreshes)
+      if (!cursorController.isVisible) {
+        cursorController.show();
+      }
       cursorController.moveTo(pos);
       sendResponse({ ok: true });
       return;
