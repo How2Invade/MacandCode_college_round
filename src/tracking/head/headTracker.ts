@@ -381,28 +381,20 @@ export class HeadTracker implements ITracker {
       if (!this.isDwelling) {
         this.isDwelling = true;
         this.dwellStartTime = now;
-        pos.dwellProgress = 0;
-      } else {
-        const elapsed = now - this.dwellStartTime;
-        pos.dwellProgress = Math.min(1, elapsed / this.dwellConfig.duration);
-        
-        if (elapsed >= this.dwellConfig.duration) {
-          this.emitEvent({
-            timestamp: now,
-            mode: 'head',
-            position: pos,
-            gesture: 'dwell',
-            confidence: 1
-          });
-          this.lastClickTime = now;
-          this.isDwelling = false;
-          pos.dwellProgress = 0;
-        }
+      } else if (now - this.dwellStartTime >= this.dwellConfig.duration) {
+        this.emitEvent({
+          timestamp: now,
+          mode: 'head',
+          position: pos,
+          gesture: 'dwell',
+          confidence: 1
+        });
+        this.lastClickTime = now;
+        this.isDwelling = false;
       }
     } else {
       this.isDwelling = false;
       this.lastDwellPos = { x: pos.x, y: pos.y };
-      pos.dwellProgress = 0;
     }
   }
 

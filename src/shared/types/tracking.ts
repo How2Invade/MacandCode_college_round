@@ -19,7 +19,6 @@ export interface PointerPosition {
   y: number; // Normalised: 0 to 1
   confidence: number; // 0 to 1
   timestamp: number;
-  dwellProgress?: number; // 0 to 1 progress for dwell-to-click UI
 }
 
 export interface TrackingStatus {

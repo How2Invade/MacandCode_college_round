@@ -6,7 +6,6 @@
 export type BrowserAction =
   | { type: "open_url"; url: string }
   | { type: "click_element"; targetId: string }
-  | { type: "click"; coordinates: { x: number; y: number } }
   | { type: "type_text"; text: string; targetId?: string }
   | { type: "scroll_page"; direction: "up" | "down"; amount: number }
   | { type: "navigate"; direction: "back" | "forward" }

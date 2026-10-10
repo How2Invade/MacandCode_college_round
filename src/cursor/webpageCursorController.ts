@@ -7,7 +7,6 @@ export class WebpageCursorController implements ICursorController {
   private cursorElement: HTMLDivElement | null = null;
   private shadowRoot: ShadowRoot | null = null;
   private animationFrameId: number | null = null;
-  private dwellRing: HTMLDivElement | null = null;
   
   // Pending position to coalesce updates
   private pendingX: number | null = null;
@@ -27,10 +26,8 @@ export class WebpageCursorController implements ICursorController {
     this.container.style.position = 'fixed';
     this.container.style.top = '0';
     this.container.style.left = '0';
-    this.container.style.width = '100%';
-    this.container.style.height = '100%';
-    this.container.style.margin = '0';
-    this.container.style.padding = '0';
+    this.container.style.width = '100vw';
+    this.container.style.height = '100vh';
     this.container.style.pointerEvents = 'none'; // pass-through clicks
     this.container.style.zIndex = '2147483647'; // max z-index
     this.container.style.display = 'none';
@@ -50,27 +47,8 @@ export class WebpageCursorController implements ICursorController {
     this.cursorElement.style.transform = 'translate(-50%, -50%)';
     this.cursorElement.style.transition = 'transform 0.05s linear'; // slight smoothing
     
-    // Create dwell ring
-    this.dwellRing = document.createElement('div');
-    this.dwellRing.style.position = 'absolute';
-    this.dwellRing.style.top = '-6px';
-    this.dwellRing.style.left = '-6px';
-    this.dwellRing.style.width = '32px';
-    this.dwellRing.style.height = '32px';
-    this.dwellRing.style.borderRadius = '50%';
-    this.dwellRing.style.background = 'transparent';
-    this.dwellRing.style.zIndex = '-1';
-    
-    this.cursorElement.appendChild(this.dwellRing);
     this.shadowRoot.appendChild(this.cursorElement);
-    
-    // Append to documentElement (<html>) to escape any CSS stacking contexts
-    // or transforms applied to the <body> tag by modern SPAs.
-    if (document.documentElement) {
-      document.documentElement.appendChild(this.container);
-    } else if (document.body) {
-      document.body.appendChild(this.container);
-    }
+    document.body.appendChild(this.container);
     // DOM elements are automatically destroyed when the window unloads
   }
 
@@ -97,10 +75,6 @@ export class WebpageCursorController implements ICursorController {
     
     this.pendingX = Math.max(0, Math.min(1, pos.x));
     this.pendingY = Math.max(0, Math.min(1, pos.y));
-    
-    if (pos.dwellProgress !== undefined) {
-      this.showDwellProgress(pos.dwellProgress);
-    }
   }
 
   public triggerClickVisual(_type: 'left' | 'right' = 'left'): void {
@@ -114,14 +88,8 @@ export class WebpageCursorController implements ICursorController {
     }, 150);
   }
 
-  public showDwellProgress(progressPercent: number): void {
-    if (!this.dwellRing) return;
-    if (progressPercent <= 0) {
-      this.dwellRing.style.background = 'transparent';
-    } else {
-      // Use conic-gradient to draw a ring
-      this.dwellRing.style.background = `conic-gradient(rgba(255, 255, 255, 0.9) ${progressPercent * 360}deg, transparent 0deg)`;
-    }
+  public showDwellProgress(_progressPercent: number): void {
+    // Stage 6 placeholder
   }
 
   public hide(): void {
@@ -153,7 +121,6 @@ export class WebpageCursorController implements ICursorController {
     }
     this.container = null;
     this.cursorElement = null;
-    this.dwellRing = null;
     this.shadowRoot = null;
   }
 }
