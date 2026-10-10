@@ -34,6 +34,8 @@ export default defineConfig({
         background: resolve(__dirname, 'src/background/index.ts'),
       },
       output: {
+        // Content scripts are classic scripts; the extension manifest cannot load
+        // Vite's shared ES-module chunks as a content script.
         entryFileNames: (chunkInfo) => {
           if (chunkInfo.name === 'background' || chunkInfo.name === 'content') {
             return '[name].js';

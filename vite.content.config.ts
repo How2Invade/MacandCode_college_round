@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
 
+/** Build the MV3 content script as one classic, self-contained script. */
 export default defineConfig({
   resolve: {
     alias: {
@@ -9,15 +10,15 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    emptyOutDir: false, // Do not wipe out the main build
+    emptyOutDir: false,
+    lib: {
+      entry: resolve(__dirname, 'src/content/index.ts'),
+      name: 'HandsfreeContent',
+      formats: ['iife'],
+      fileName: () => 'content.js',
+    },
     rollupOptions: {
-      input: {
-        content: resolve(__dirname, 'src/content/index.ts'),
-      },
-      output: {
-        entryFileNames: '[name].js',
-        format: 'iife',
-      },
+      output: { inlineDynamicImports: true },
     },
   },
 });
