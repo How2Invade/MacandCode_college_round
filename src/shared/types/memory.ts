@@ -39,6 +39,7 @@ export interface ITaskMemoryStore {
   getTask(taskId: string): Promise<TaskRecord | null>;
   listTasks(limit?: number): Promise<TaskRecord[]>;
   updateTaskStatus(taskId: string, status: TaskStatus): Promise<void>;
+  addStep(taskId: string, action: BrowserAction): Promise<number>;
   recordStepResult(taskId: string, stepNumber: number, result: ActionResult): Promise<void>;
   clearHistory(): Promise<void>;
 }

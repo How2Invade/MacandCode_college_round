@@ -8,7 +8,8 @@ export type BrowserAction =
   | { type: "click_element"; targetId: string }
   | { type: "type_text"; text: string; targetId?: string }
   | { type: "scroll_page"; direction: "up" | "down"; amount: number }
-  | { type: "navigate"; direction: "back" | "forward" }
+  | { type: "navigate_back" }
+  | { type: "navigate_forward" }
   | { type: "switch_tab"; direction: "next" | "previous" }
   | { type: "read_page" };
 

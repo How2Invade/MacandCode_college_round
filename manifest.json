@@ -10,6 +10,9 @@
     "activeTab",
     "scripting"
   ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "action": {
     "default_popup": "src/popup/index.html",
     "default_title": "Handsfree Assistant"
@@ -26,6 +29,7 @@
       "matches": [
         "<all_urls>"
       ],
+      "all_frames": true,
       "js": [
         "content.js"
       ],

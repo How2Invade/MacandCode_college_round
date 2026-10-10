@@ -80,6 +80,8 @@ export interface RejectActionPayload {
 
 export interface ExecuteBrowserActionPayload {
   action: BrowserAction;
+  /** Optional explicit webpage tab to act on. Validated by the background before use. */
+  tabId?: number;
 }
 
 export interface ActionCompletedPayload {

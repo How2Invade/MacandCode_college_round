@@ -50,22 +50,19 @@ export class MockAiClient implements IAssistantClient {
   ): Promise<BrowserAction[]> {
     logger.info('MockAiClient', `Generating mock action plan for goal: "${goal}" in [${language}]`);
 
+    if (goal.toLowerCase().includes('youtube')) {
+      return [{ type: 'open_url', url: 'https://www.youtube.com' }];
+    } else if (goal.toLowerCase().includes('google')) {
+      return [{ type: 'open_url', url: 'https://www.google.com' }];
+    }
+
     // Return agreed BrowserAction variants
     const plan: BrowserAction[] = [
       {
         type: 'scroll_page',
         direction: 'down',
         amount: 300,
-      },
-      {
-        type: 'click_element',
-        targetId: 'search-input',
-      },
-      {
-        type: 'type_text',
-        text: goal,
-        targetId: 'search-input',
-      },
+      }
     ];
 
     return plan;
