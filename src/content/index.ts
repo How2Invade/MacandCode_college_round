@@ -8,6 +8,11 @@ import { PointerPosition } from '../shared/types/tracking';
 import { BrowserAction, ActionResult } from '../shared/types/actions';
 import { logger } from '../shared/utils';
 
+type PointerClickAction = {
+  type: 'click';
+  coordinates: { x: number; y: number };
+};
+
 logger.info('ContentScript', 'Handsfree content script loaded into page: ' + window.location.href);
 
 const cursorController = new WebpageCursorController();
@@ -38,8 +43,30 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
     }
 
     if (message.type === 'EXECUTE_BROWSER_ACTION') {
-      const action = message.payload?.action as BrowserAction;
+      const action = message.payload?.action as BrowserAction | PointerClickAction;
       logger.info('ContentScript', `Simulating content action: ${action?.type}`);
+
+      if (action?.type === 'click') {
+        const coordinates = action.coordinates;
+        if (!coordinates || !Number.isFinite(coordinates.x) || !Number.isFinite(coordinates.y)) {
+          sendResponse({ success: false, message: 'Click requires finite normalized coordinates.' } satisfies ActionResult);
+          return true;
+        }
+
+        const x = Math.max(0, Math.min(1, coordinates.x)) * window.innerWidth;
+        const y = Math.max(0, Math.min(1, coordinates.y)) * window.innerHeight;
+        const target = document.elementFromPoint(x, y) as HTMLElement | null;
+        if (!target) {
+          sendResponse({ success: false, message: 'No page element found under the cursor.' } satisfies ActionResult);
+          return true;
+        }
+
+        target.focus?.({ preventScroll: true });
+        target.click();
+        cursorController.triggerClickVisual('left');
+        sendResponse({ success: true, message: 'Clicked page element under cursor.', data: { tagName: target.tagName } } satisfies ActionResult);
+        return true;
+      }
 
       const result: ActionResult = {
         success: true,

@@ -87,13 +87,19 @@ describe('SharedCursorController', () => {
     expect(lastCall.x).toBeCloseTo(0.75);
   });
 
-  it('forwards click signals for dwell gestures', async () => {
+  it('forwards click signals only for the head mouth-open gesture', async () => {
     await controller.start('head');
     const clickSpy = vi.spyOn(cursorUI, 'triggerClickVisual');
+    const position = { x: 0.5, y: 0.5, confidence: 1, timestamp: Date.now() };
     
-    // @ts-ignore
-    headTracker.emitEvent({ mode: 'head', gesture: 'dwell', position: {x:0.5, y:0.5} });
+    // @ts-expect-error Test-only mock helper is intentionally private.
+    headTracker.emitEvent({ mode: 'head', gesture: 'mouth_open', position });
     expect(clickSpy).toHaveBeenCalledWith('left');
+
+    clickSpy.mockClear();
+    // @ts-expect-error Test-only mock helper is intentionally private.
+    headTracker.emitEvent({ mode: 'head', gesture: 'dwell', position });
+    expect(clickSpy).not.toHaveBeenCalled();
   });
 
 });

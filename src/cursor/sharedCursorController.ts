@@ -204,7 +204,9 @@ export class SharedCursorController {
   private handleTrackingEvent(event: TrackingEvent) {
     if (this.isPaused) return;
 
-    if (event.gesture === 'dwell' || event.gesture === 'pinch' || event.gesture === 'nod') {
+    // Head tracking clicks are intentionally restricted to a deliberate mouth-open gesture.
+    // Hand gestures retain their own event contract and do not leak into head mode.
+    if (event.mode === 'head' && event.gesture === 'mouth_open') {
       if (this.cursorUI) {
          this.cursorUI.triggerClickVisual('left');
       }

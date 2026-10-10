@@ -36,6 +36,7 @@ export type GestureType =
   | "palm_open"
   | "nod"
   | "shake"
+  | "mouth_open"
   | "dwell";
 
 export interface TrackingEvent {

@@ -1,5 +1,7 @@
 import { PointerPosition } from '../shared/types/tracking';
 import { ICursorController } from './mockCursorController';
+import { HoverDetector } from './hoverDetector';
+import { HoverHighlighter } from './hoverHighlighter';
 
 export class WebpageCursorController implements ICursorController {
   private isVisible = false;
@@ -11,6 +13,10 @@ export class WebpageCursorController implements ICursorController {
   // Pending position to coalesce updates
   private pendingX: number | null = null;
   private pendingY: number | null = null;
+
+  // Hover detection and highlighting
+  private readonly hoverDetector = new HoverDetector();
+  private readonly hoverHighlighter = new HoverHighlighter();
 
   constructor() {
     // Lazily initialize DOM when needed to prevent issues on early script injection
@@ -58,7 +64,15 @@ export class WebpageCursorController implements ICursorController {
       const py = this.pendingY * window.innerHeight;
       this.cursorElement.style.left = `${px}px`;
       this.cursorElement.style.top = `${py}px`;
-      
+
+      // Update hover detection at the committed pixel coordinates
+      const target = this.hoverDetector.update(px, py);
+      if (target) {
+        this.hoverHighlighter.highlight(target);
+      } else {
+        this.hoverHighlighter.clearHighlight();
+      }
+
       this.pendingX = null;
       this.pendingY = null;
     }
@@ -101,6 +115,9 @@ export class WebpageCursorController implements ICursorController {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;
     }
+    // Stop hover detection and clear the highlight ring
+    this.hoverDetector.stop();
+    this.hoverHighlighter.clearHighlight();
   }
 
   public show(): void {
@@ -112,10 +129,12 @@ export class WebpageCursorController implements ICursorController {
     if (this.animationFrameId === null) {
       this.animationFrameId = requestAnimationFrame(this.renderLoop);
     }
+    this.hoverDetector.start();
   }
 
   public destroy(): void {
     this.hide();
+    this.hoverHighlighter.destroy();
     if (this.container && this.container.parentNode) {
       this.container.parentNode.removeChild(this.container);
     }

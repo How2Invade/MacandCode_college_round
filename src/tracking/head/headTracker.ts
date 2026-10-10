@@ -51,20 +51,11 @@ export class HeadTracker implements ITracker {
   private neutralPitch = 0;
   private neutralYaw = 0;
   
-  // Dwell
-  private dwellStartTime = 0;
-  private dwellConfig = {
-    duration: 1000,
-    radius: 0.05,
-    cooldown: 500,
-  };
+  // Click gesture: a deliberate mouth-open, edge-triggered to prevent repeats.
   private lastClickTime = 0;
-  private lastDwellPos = { x: 0.5, y: 0.5 };
-  private isDwelling = false;
-  
-  // Blendshape Gestures
-  private lastBlinkTime = 0;
-  private lastJawOpenTime = 0;
+  private mouthIsOpen = false;
+  private readonly mouthOpenThreshold = 0.62;
+  private readonly clickCooldownMs = 900;
 
   public setPreviewElements(video: HTMLVideoElement | null, canvas: HTMLCanvasElement | null) {
     this.previewVideo = video;
@@ -322,7 +313,6 @@ export class HeadTracker implements ITracker {
     };
     
     this.emitPointer(pos);
-    this.handleDwell(pos);
     return pos;
   }
 
@@ -336,66 +326,16 @@ export class HeadTracker implements ITracker {
       shapes[cat.categoryName] = cat.score;
     }
 
-    // 1. Double Eye Blink (Both eyes closed) -> Click
-    const blinkThreshold = 0.5;
-    if (shapes['eyeBlinkLeft'] > blinkThreshold && shapes['eyeBlinkRight'] > blinkThreshold) {
-       if (now - this.lastBlinkTime > 1000) { // 1 second cooldown
-          this.emitEvent({
-             timestamp: now,
-             mode: 'head',
-             position: pos,
-             gesture: 'nod', // Reusing 'nod' for the click event as handled in SharedCursorController
-             confidence: 1
-          });
-          this.lastBlinkTime = now;
-          this.lastClickTime = now; // Reset dwell as well
-       }
+    const mouthOpen = (shapes.jawOpen || 0) > this.mouthOpenThreshold;
+    if (!mouthOpen) {
+      this.mouthIsOpen = false;
+      return;
     }
+    if (this.mouthIsOpen || now - this.lastClickTime < this.clickCooldownMs) return;
 
-    // 2. Jaw Open (Mouth open) -> Can be used for another action, emitting 'pinch' which is mapped to click currently, but let's leave it as a distinct gesture.
-    const jawThreshold = 0.6;
-    if (shapes['jawOpen'] > jawThreshold) {
-       if (now - this.lastJawOpenTime > 1000) {
-          this.emitEvent({
-             timestamp: now,
-             mode: 'head',
-             position: pos,
-             gesture: 'pinch', // Mapped to left click visual currently
-             confidence: 1
-          });
-          this.lastJawOpenTime = now;
-       }
-    }
-  }
-
-  private handleDwell(pos: PointerPosition) {
-    const now = Date.now();
-    if (now - this.lastClickTime < this.dwellConfig.cooldown) {
-       this.isDwelling = false;
-       return;
-    }
-
-    const dist = Math.sqrt(Math.pow(pos.x - this.lastDwellPos.x, 2) + Math.pow(pos.y - this.lastDwellPos.y, 2));
-    
-    if (dist < this.dwellConfig.radius) {
-      if (!this.isDwelling) {
-        this.isDwelling = true;
-        this.dwellStartTime = now;
-      } else if (now - this.dwellStartTime >= this.dwellConfig.duration) {
-        this.emitEvent({
-          timestamp: now,
-          mode: 'head',
-          position: pos,
-          gesture: 'dwell',
-          confidence: 1
-        });
-        this.lastClickTime = now;
-        this.isDwelling = false;
-      }
-    } else {
-      this.isDwelling = false;
-      this.lastDwellPos = { x: pos.x, y: pos.y };
-    }
+    this.mouthIsOpen = true;
+    this.lastClickTime = now;
+    this.emitEvent({ timestamp: now, mode: 'head', position: pos, gesture: 'mouth_open', confidence: 1 });
   }
 
   public async pause(): Promise<void> {
