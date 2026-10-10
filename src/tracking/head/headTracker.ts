@@ -7,6 +7,7 @@ import {
 } from '../../shared/types/tracking';
 import { logger } from '../../shared/utils';
 import { FaceLandmarker, FilesetResolver, DrawingUtils } from '@mediapipe/tasks-vision';
+import { OneEuroFilter } from '../../shared/utils/oneEuroFilter';
 
 // A curated, deliberately sparse semantic mesh following natural facial contours
 const SPARSE_MESH_CONNECTIONS = [{"start":71,"end":68},{"start":68,"end":104},{"start":104,"end":69},{"start":69,"end":108},{"start":108,"end":151},{"start":151,"end":337},{"start":337,"end":299},{"start":299,"end":333},{"start":333,"end":298},{"start":298,"end":301},{"start":162,"end":21},{"start":21,"end":54},{"start":54,"end":103},{"start":103,"end":67},{"start":67,"end":109},{"start":109,"end":10},{"start":10,"end":338},{"start":338,"end":297},{"start":297,"end":332},{"start":332,"end":284},{"start":284,"end":251},{"start":251,"end":389},{"start":116,"end":143},{"start":143,"end":227},{"start":227,"end":234},{"start":234,"end":127},{"start":127,"end":162},{"start":50,"end":117},{"start":117,"end":118},{"start":118,"end":119},{"start":119,"end":120},{"start":120,"end":100},{"start":345,"end":372},{"start":372,"end":447},{"start":447,"end":454},{"start":454,"end":356},{"start":356,"end":389},{"start":280,"end":346},{"start":346,"end":347},{"start":347,"end":348},{"start":348,"end":349},{"start":349,"end":329}];
@@ -32,7 +33,7 @@ export class HeadTracker implements ITracker {
   private drawingUtils: DrawingUtils | null = null;
   
   // Pose diagnostics
-  public pose: { yaw: number, pitch: number, roll: number, hasMatrix: boolean } = { yaw: 0, pitch: 0, roll: 0, hasMatrix: false };
+  public pose: { yaw: number, pitch: number, roll: number, hasMatrix: boolean, relYaw: number, relPitch: number, targetX: number, targetY: number } = { yaw: 0, pitch: 0, roll: 0, hasMatrix: false, relYaw: 0, relPitch: 0, targetX: 0, targetY: 0 };
   
   private requestAnimationFrameId: number | null = null;
   
@@ -40,6 +41,7 @@ export class HeadTracker implements ITracker {
   private sensitivity = 2.5;
   private smoothing = 0.8;
   private deadzone = 0.02;
+  public useExperimentalAcceleration = false;
   
   // State
   private lastX = 0.5;
@@ -50,6 +52,11 @@ export class HeadTracker implements ITracker {
   private isCalibrated = false;
   private neutralPitch = 0;
   private neutralYaw = 0;
+  
+  // Smoothing & Filtering
+  private pitchFilter = new OneEuroFilter(60, 0.01, 5.0, 0.7);
+  private yawFilter = new OneEuroFilter(60, 0.01, 5.0, 0.7);
+  private rollFilter = new OneEuroFilter(60, 0.01, 5.0, 0.7);
   
   // Dwell
   private dwellStartTime = 0;
@@ -177,7 +184,7 @@ export class HeadTracker implements ITracker {
           this.drawOverlay(landmarks);
           this.extractPose(results.facialTransformationMatrixes?.[0]);
 
-          const pos = this.processLandmarks(landmarks);
+          const pos = this.processPose();
           
           if (results.faceBlendshapes && results.faceBlendshapes.length > 0 && pos) {
              this.processBlendshapes(results.faceBlendshapes[0].categories, pos);
@@ -215,11 +222,11 @@ export class HeadTracker implements ITracker {
     let yaw = Math.atan2(-r20, Math.sqrt(r21 * r21 + r22 * r22)) * 180 / Math.PI;
     let roll = Math.atan2(r10, r00) * 180 / Math.PI;
     
-    // Mild smoothing for display
-    const alpha = 0.5;
-    this.pose.pitch = this.pose.pitch * alpha + pitch * (1 - alpha);
-    this.pose.yaw = this.pose.yaw * alpha + yaw * (1 - alpha);
-    this.pose.roll = this.pose.roll * alpha + roll * (1 - alpha);
+    // Smooth using OneEuroFilter (performance.now() for timestamp)
+    const timestamp = performance.now() / 1000;
+    this.pose.pitch = this.pitchFilter.filter(pitch, timestamp);
+    this.pose.yaw = this.yawFilter.filter(yaw, timestamp);
+    this.pose.roll = this.rollFilter.filter(roll, timestamp);
     this.pose.hasMatrix = true;
   }
 
@@ -239,24 +246,37 @@ export class HeadTracker implements ITracker {
     
     ctx.clearRect(0, 0, vw, vh);
     
+    const drawCustomLines = (points: any[], edges: any[], color: string, width: number) => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      for (const edge of edges) {
+        const p1 = points[edge.start];
+        const p2 = points[edge.end];
+        if (p1 && p2) {
+          ctx.moveTo(p1.x * vw, p1.y * vh);
+          ctx.lineTo(p2.x * vw, p2.y * vh);
+        }
+      }
+      ctx.stroke();
+    };
+
     // Draw sparse secondary facial mesh with subtle style
-    this.drawingUtils.drawConnectors(landmarks, SPARSE_MESH_CONNECTIONS, {
-      color: 'rgba(255, 255, 255, 0.25)',
-      lineWidth: 0.55
-    });
+    drawCustomLines(landmarks, SPARSE_MESH_CONNECTIONS, 'rgba(255, 255, 255, 0.25)', 0.55);
 
     // Draw primary contours with refined bright lines
-    const contourConfig = { color: 'rgba(255, 255, 255, 0.90)', lineWidth: 1.0 };
-    this.drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_FACE_OVAL, contourConfig);
-    this.drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_LIPS, contourConfig);
-    this.drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE, contourConfig);
-    this.drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_LEFT_EYE, contourConfig);
-    this.drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_RIGHT_EYEBROW, contourConfig);
-    this.drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_LEFT_EYEBROW, contourConfig);
+    const contourColor = 'rgba(255, 255, 255, 0.90)';
+    const contourWidth = 1.0;
+    drawCustomLines(landmarks, FaceLandmarker.FACE_LANDMARKS_FACE_OVAL, contourColor, contourWidth);
+    drawCustomLines(landmarks, FaceLandmarker.FACE_LANDMARKS_LIPS, contourColor, contourWidth);
+    drawCustomLines(landmarks, FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE, contourColor, contourWidth);
+    drawCustomLines(landmarks, FaceLandmarker.FACE_LANDMARKS_LEFT_EYE, contourColor, contourWidth);
+    drawCustomLines(landmarks, FaceLandmarker.FACE_LANDMARKS_RIGHT_EYEBROW, contourColor, contourWidth);
+    drawCustomLines(landmarks, FaceLandmarker.FACE_LANDMARKS_LEFT_EYEBROW, contourColor, contourWidth);
     
     // Draw an explicit nose bridge contour 
     const noseContour = [{"start":168,"end":6},{"start":6,"end":197},{"start":197,"end":195},{"start":195,"end":5},{"start":5,"end":4}];
-    this.drawingUtils.drawConnectors(landmarks, noseContour, contourConfig);
+    drawCustomLines(landmarks, noseContour, contourColor, contourWidth);
   }
 
   private clearOverlay() {
@@ -265,22 +285,29 @@ export class HeadTracker implements ITracker {
     if (ctx) ctx.clearRect(0, 0, this.previewCanvas.width, this.previewCanvas.height);
   }
 
-  private processLandmarks(landmarks: any) {
-    if (this.status.state === 'calibrating') return;
+  private processPose() {
+    if (this.status.state === 'calibrating' || !this.pose.hasMatrix) return;
     
-    const nose = landmarks[1];
-    const leftEye = landmarks[33];
-    const rightEye = landmarks[263];
-    
-    const eyeCenter = (leftEye.x + rightEye.x) / 2;
-    const currentYaw = nose.x - eyeCenter;
-    
-    const eyeCenterY = (leftEye.y + rightEye.y) / 2;
-    const currentPitch = nose.y - eyeCenterY;
+    const currentYaw = this.pose.yaw;
+    const currentPitch = this.pose.pitch;
 
     // Relative movement from neutral position (mirrored horizontally)
-    let deltaX = -(currentYaw - this.neutralYaw) * this.sensitivity;
-    let deltaY = (currentPitch - this.neutralPitch) * this.sensitivity;
+    let diffYaw = -(currentYaw - this.neutralYaw);
+    let diffPitch = (currentPitch - this.neutralPitch);
+
+    let deltaX = 0;
+    let deltaY = 0;
+
+    if (this.useExperimentalAcceleration) {
+      // Experimental: Tracky Mouse-style non-linear acceleration curve
+      const accelFactor = 1.2;
+      deltaX = Math.sign(diffYaw) * (Math.abs(diffYaw) ** accelFactor) / 30 * this.sensitivity;
+      deltaY = Math.sign(diffPitch) * (Math.abs(diffPitch) ** accelFactor) / 20 * this.sensitivity;
+    } else {
+      // Baseline: Absolute linear mapping (scaled to normalized [0, 1] screen space)
+      deltaX = diffYaw / 30 * this.sensitivity;
+      deltaY = diffPitch / 20 * this.sensitivity;
+    }
 
     // Apply Deadzone
     if (Math.abs(deltaX) < this.deadzone) deltaX = 0;
@@ -292,6 +319,12 @@ export class HeadTracker implements ITracker {
     // Clamp
     targetX = Math.max(0, Math.min(1, targetX));
     targetY = Math.max(0, Math.min(1, targetY));
+    
+    // Save diagnostics
+    this.pose.relYaw = currentYaw - this.neutralYaw;
+    this.pose.relPitch = currentPitch - this.neutralPitch;
+    this.pose.targetX = targetX;
+    this.pose.targetY = targetY;
 
     // Smoothing (exponential moving average)
     const x = this.lastX * this.smoothing + targetX * (1 - this.smoothing);
@@ -428,35 +461,20 @@ export class HeadTracker implements ITracker {
     
     return new Promise((resolve) => {
        setTimeout(() => {
-         if (this.faceLandmarker && this.videoElement) {
-            const results = this.faceLandmarker.detectForVideo(this.videoElement, performance.now());
-            if (results.faceLandmarks && results.faceLandmarks.length > 0) {
-               const landmarks = results.faceLandmarks[0];
-               const nose = landmarks[1];
-               const leftEye = landmarks[33];
-               const rightEye = landmarks[263];
-               
-               const eyeCenter = (leftEye.x + rightEye.x) / 2;
-               const eyeCenterY = (leftEye.y + rightEye.y) / 2;
-               
-               this.neutralYaw = nose.x - eyeCenter;
-               this.neutralPitch = nose.y - eyeCenterY;
-               
-               this.isCalibrated = true;
-               this.status.state = 'active';
-               this.status.message = 'Calibration complete';
-               resolve();
-            } else {
-               this.neutralYaw = 0;
-               this.neutralPitch = 0;
-               this.isCalibrated = true;
-               this.status.state = 'active';
-               this.status.message = 'Calibration complete (fallback)';
-               resolve();
-            }
+         if (this.pose.hasMatrix) {
+            this.neutralYaw = this.pose.yaw;
+            this.neutralPitch = this.pose.pitch;
+            this.isCalibrated = true;
+            this.status.state = 'active';
+            this.status.message = 'Calibration complete';
          } else {
-            resolve();
+            this.neutralYaw = 0;
+            this.neutralPitch = 0;
+            this.isCalibrated = true;
+            this.status.state = 'active';
+            this.status.message = 'Calibration complete (fallback)';
          }
+         resolve();
        }, 2000); 
     });
   }

@@ -3,30 +3,38 @@
  * Injected into webpages to provide visual cursor overlays and execute DOM actions.
  */
 
-import { MockCursorController } from '../cursor/mockCursorController';
+import { WebpageCursorController } from '../cursor/webpageCursorController';
 import { PointerPosition } from '../shared/types/tracking';
 import { BrowserAction, ActionResult } from '../shared/types/actions';
 import { logger } from '../shared/utils';
 
 logger.info('ContentScript', 'Handsfree content script loaded into page: ' + window.location.href);
 
-const cursorController = new MockCursorController();
+const cursorController = new WebpageCursorController();
 
 // Listen for messages from extension background / sidepanel
 if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    logger.debug('ContentScript', `Received message: ${message?.type}`);
-
     if (message.type === 'CONTENT_PING') {
       sendResponse({ status: 'pong', url: window.location.href });
-      return true;
+      return;
+    }
+
+    if (message.type === 'POINTER_VISIBILITY') {
+      if (message.payload.visible) {
+        cursorController.show();
+      } else {
+        cursorController.hide();
+      }
+      sendResponse({ ok: true });
+      return;
     }
 
     if (message.type === 'POINTER_POSITION_UPDATE') {
       const pos = message.payload as PointerPosition;
       cursorController.moveTo(pos);
       sendResponse({ ok: true });
-      return true;
+      return;
     }
 
     if (message.type === 'EXECUTE_BROWSER_ACTION') {
@@ -40,9 +48,9 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
       };
 
       sendResponse(result);
-      return true;
+      return;
     }
 
-    return true;
+    return false;
   });
 }

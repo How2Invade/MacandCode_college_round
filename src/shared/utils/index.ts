@@ -30,3 +30,4 @@ export const logger = {
     }
   },
 };
+export * from './oneEuroFilter';
