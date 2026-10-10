@@ -68,6 +68,18 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
         return true;
       }
 
+      if (action?.type === 'undo') {
+        document.execCommand('undo');
+        sendResponse({ success: true, message: 'Executed undo.' } satisfies ActionResult);
+        return true;
+      }
+
+      if (action?.type === 'redo') {
+        document.execCommand('redo');
+        sendResponse({ success: true, message: 'Executed redo.' } satisfies ActionResult);
+        return true;
+      }
+
       const result: ActionResult = {
         success: true,
         message: `Content script handled ${action?.type}`,

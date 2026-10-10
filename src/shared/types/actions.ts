@@ -10,7 +10,9 @@ export type BrowserAction =
   | { type: "scroll_page"; direction: "up" | "down"; amount: number }
   | { type: "navigate"; direction: "back" | "forward" }
   | { type: "switch_tab"; direction: "next" | "previous" }
-  | { type: "read_page" };
+  | { type: "read_page" }
+  | { type: "undo" }
+  | { type: "redo" };
 
 export type ApprovalMode = "ask" | "auto";
 

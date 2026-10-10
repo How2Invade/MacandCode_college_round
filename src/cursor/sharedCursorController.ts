@@ -41,6 +41,8 @@ export class SharedCursorController {
 
   // Concurrency lock for mode switching
   private isSwitching = false;
+  
+  public gestureActionsEnabled = false;
 
   constructor(headTracker: ITracker, handTracker: ITracker, cursorUI: ICursorController) {
     this.headTracker = headTracker;
@@ -206,20 +208,81 @@ export class SharedCursorController {
 
     // Head tracking clicks are intentionally restricted to a deliberate mouth-open gesture.
     // Hand gestures retain their own event contract and do not leak into head mode.
-    if (event.mode === 'head' && event.gesture === 'mouth_open') {
-      if (this.cursorUI) {
-         this.cursorUI.triggerClickVisual('left');
-      }
-      
-      if (typeof chrome !== 'undefined' && chrome.tabs) {
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-          if (tabs[0]?.id) {
-            chrome.tabs.sendMessage(tabs[0].id, { 
-              type: 'EXECUTE_BROWSER_ACTION', 
-              payload: { action: { type: 'click', coordinates: { x: event.position.x, y: event.position.y } } }
-            }).catch(() => {});
+    if (event.mode === 'head') {
+      if (event.gesture === 'mouth_open') {
+        if (this.cursorUI) {
+           this.cursorUI.triggerClickVisual('left');
+        }
+        
+        if (typeof chrome !== 'undefined' && chrome.tabs) {
+          chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            if (tabs[0]?.id) {
+              chrome.tabs.sendMessage(tabs[0].id, { 
+                type: 'EXECUTE_BROWSER_ACTION', 
+                payload: { action: { type: 'click', coordinates: { x: event.position.x, y: event.position.y } } }
+              }).catch(() => {});
+            }
+          });
+        }
+      } else if (this.gestureActionsEnabled) {
+        if (event.gesture === 'tab_left' || event.gesture === 'tab_right') {
+          // Switch tab
+          if (typeof chrome !== 'undefined' && chrome.tabs) {
+            chrome.tabs.query({ currentWindow: true }, (tabs) => {
+              chrome.tabs.query({ active: true, currentWindow: true }, (activeTabs) => {
+                const activeIndex = activeTabs[0]?.index ?? 0;
+                let nextIndex = activeIndex;
+                if (event.gesture === 'tab_right') {
+                   // User says it's swapped, so tab_right now goes to previous tab
+                   nextIndex = (activeIndex - 1 + tabs.length) % tabs.length;
+                } else {
+                   // and tab_left goes to next tab
+                   nextIndex = (activeIndex + 1) % tabs.length;
+                }
+                const nextTab = tabs.find(t => t.index === nextIndex);
+                if (nextTab?.id) {
+                  chrome.tabs.update(nextTab.id, { active: true });
+                }
+              });
+            });
           }
-        });
+        } else if (event.gesture === 'undo' || event.gesture === 'redo') {
+           if (typeof chrome !== 'undefined' && chrome.tabs) {
+             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+               if (tabs[0]?.id) {
+                 chrome.tabs.sendMessage(tabs[0].id, {
+                   type: 'EXECUTE_BROWSER_ACTION',
+                   payload: { action: { type: event.gesture } }
+                 }).catch(() => {});
+               }
+             });
+           }
+        } else if (event.gesture === 'nod') {
+          // Scroll
+          if (typeof chrome !== 'undefined' && chrome.tabs) {
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+              if (tabs[0]?.id) {
+                // In content script EXECUTE_BROWSER_ACTION for 'scroll_page' doesn't exist out of the box? 
+                // Let's send a generic message that the content script or action handler might understand, or we can inject a script.
+                // Wait, the content script handles EXECUTE_BROWSER_ACTION, but maybe not scroll.
+                // Let's use chrome.scripting to inject scroll or pass it to content script.
+                const tabId = tabs[0].id;
+                chrome.tabs.sendMessage(tabId, { 
+                  type: 'EXECUTE_BROWSER_ACTION', 
+                  payload: { action: { type: 'scroll' } } 
+                }, () => {
+                  // Fallback if not handled by content script
+                  if (chrome.scripting && tabId !== undefined) {
+                    chrome.scripting.executeScript({
+                      target: { tabId },
+                      func: () => window.scrollBy({ top: 300, behavior: 'smooth' })
+                    }).catch(() => {});
+                  }
+                });
+              }
+            });
+          }
+        }
       }
     }
   }

@@ -7,6 +7,7 @@ import {
 } from '../../shared/types/tracking';
 import { logger } from '../../shared/utils';
 import { FaceLandmarker, FilesetResolver, DrawingUtils } from '@mediapipe/tasks-vision';
+import { GestureStateMachine, GestureInput, GestureOutput } from '../../cursor/gestureStateMachine';
 
 // A curated, deliberately sparse semantic mesh following natural facial contours
 const SPARSE_MESH_CONNECTIONS = [{"start":71,"end":68},{"start":68,"end":104},{"start":104,"end":69},{"start":69,"end":108},{"start":108,"end":151},{"start":151,"end":337},{"start":337,"end":299},{"start":299,"end":333},{"start":333,"end":298},{"start":298,"end":301},{"start":162,"end":21},{"start":21,"end":54},{"start":54,"end":103},{"start":103,"end":67},{"start":67,"end":109},{"start":109,"end":10},{"start":10,"end":338},{"start":338,"end":297},{"start":297,"end":332},{"start":332,"end":284},{"start":284,"end":251},{"start":251,"end":389},{"start":116,"end":143},{"start":143,"end":227},{"start":227,"end":234},{"start":234,"end":127},{"start":127,"end":162},{"start":50,"end":117},{"start":117,"end":118},{"start":118,"end":119},{"start":119,"end":120},{"start":120,"end":100},{"start":345,"end":372},{"start":372,"end":447},{"start":447,"end":454},{"start":454,"end":356},{"start":356,"end":389},{"start":280,"end":346},{"start":346,"end":347},{"start":347,"end":348},{"start":348,"end":349},{"start":349,"end":329}];
@@ -37,7 +38,7 @@ export class HeadTracker implements ITracker {
   private requestAnimationFrameId: number | null = null;
   
   // Settings
-  private sensitivity = 2.5;
+  private sensitivity = 1.0; // Reduced sensitivity
   private smoothing = 0.8;
   private deadzone = 0.02;
   
@@ -51,11 +52,17 @@ export class HeadTracker implements ITracker {
   private neutralPitch = 0;
   private neutralYaw = 0;
   
-  // Click gesture: a deliberate mouth-open, edge-triggered to prevent repeats.
-  private lastClickTime = 0;
-  private mouthIsOpen = false;
-  private readonly mouthOpenThreshold = 0.62;
-  private readonly clickCooldownMs = 900;
+  private gestureMachine = new GestureStateMachine();
+  
+  // Current jaw open score from most recent frame
+  private currentJawOpenScore = 0;
+
+  public latestGesture: string = 'None';
+  public latestGestureOutput: GestureOutput | null = null;
+  
+  public configureGestures(config: Partial<Parameters<typeof this.gestureMachine.configure>[0]>) {
+     this.gestureMachine.configure(config);
+  }
 
   public setPreviewElements(video: HTMLVideoElement | null, canvas: HTMLCanvasElement | null) {
     this.previewVideo = video;
@@ -162,16 +169,19 @@ export class HeadTracker implements ITracker {
         this.lastTime = this.videoElement.currentTime;
         const results = this.faceLandmarker.detectForVideo(this.videoElement, startTimeMs);
         
+        let trackingValid = false;
+        
         if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+          trackingValid = true;
           const landmarks = results.faceLandmarks[0];
           
           this.drawOverlay(landmarks);
           this.extractPose(results.facialTransformationMatrixes?.[0]);
 
-          const pos = this.processPose();
+          const rawPos = this.processPose();
           
-          if (results.faceBlendshapes && results.faceBlendshapes.length > 0 && pos) {
-             this.processBlendshapes(results.faceBlendshapes[0].categories, pos);
+          if (results.faceBlendshapes && results.faceBlendshapes.length > 0 && rawPos) {
+             this.currentJawOpenScore = this.extractJawOpenScore(results.faceBlendshapes[0].categories);
           }
           
           this.status.confidence = 1;
@@ -181,9 +191,54 @@ export class HeadTracker implements ITracker {
           // Face lost
           if (this.status.state === 'active') {
              this.status.confidence = 0;
-             // We pause movement but might emit a tracking-lost state if needed,
-             // for now, we just skip updating coordinates to prevent jitter.
           }
+        }
+        
+        // Pass everything to the Gesture State Machine
+        const input: GestureInput = {
+          jawOpenScore: this.currentJawOpenScore,
+          relativeYawDeg: this.pose.relYaw,
+          relativeRollDeg: this.pose.roll,
+          trackingValid,
+          nowMs: Date.now()
+        };
+        
+        const output = this.gestureMachine.update(input);
+        this.latestGestureOutput = output;
+        
+        // Use frozen or live position
+        const emitPos: PointerPosition = {
+          x: this.lastX,
+          y: this.lastY,
+          confidence: this.status.confidence,
+          timestamp: input.nowMs
+        };
+        
+        if (trackingValid && !output.freezeCursor) {
+           this.emitPointer(emitPos);
+        }
+        
+        // Handle Action
+        if (output.action === 'MOUTH_CLICK') {
+           this.setLiveGesture('Mouth Click');
+           this.emitEvent({ timestamp: input.nowMs, mode: 'head', position: emitPos, gesture: 'mouth_open', confidence: 1 });
+        } else if (output.action === 'TAB_LEFT') {
+           this.setLiveGesture('Tab Left');
+           this.emitEvent({ timestamp: input.nowMs, mode: 'head', position: emitPos, gesture: 'tab_left', confidence: 1 });
+        } else if (output.action === 'TAB_RIGHT') {
+           this.setLiveGesture('Tab Right');
+           this.emitEvent({ timestamp: input.nowMs, mode: 'head', position: emitPos, gesture: 'tab_right', confidence: 1 });
+        } else if (output.action === 'UNDO') {
+           this.setLiveGesture('Undo');
+           this.emitEvent({ timestamp: input.nowMs, mode: 'head', position: emitPos, gesture: 'undo', confidence: 1 });
+        } else if (output.action === 'REDO') {
+           this.setLiveGesture('Redo');
+           this.emitEvent({ timestamp: input.nowMs, mode: 'head', position: emitPos, gesture: 'redo', confidence: 1 });
+        }
+        
+        // Diagnostic label update
+        if (output.gestureLabel !== 'None' && output.gestureLabel !== 'Frozen') {
+           this.setLiveGesture(output.gestureLabel);
         }
       }
     }
@@ -312,42 +367,39 @@ export class HeadTracker implements ITracker {
       timestamp: Date.now()
     };
     
-    this.emitPointer(pos);
     return pos;
   }
 
-  private processBlendshapes(categories: any[], pos: PointerPosition) {
-    if (this.status.state === 'calibrating') return;
-    const now = Date.now();
-
-    // Create a map of blendshapes
-    const shapes: Record<string, number> = {};
+  private extractJawOpenScore(categories: any[]): number {
     for (const cat of categories) {
-      shapes[cat.categoryName] = cat.score;
+      if (cat.categoryName === 'jawOpen') {
+        return cat.score;
+      }
     }
+    return 0;
+  }
 
-    const mouthOpen = (shapes.jawOpen || 0) > this.mouthOpenThreshold;
-    if (!mouthOpen) {
-      this.mouthIsOpen = false;
-      return;
-    }
-    if (this.mouthIsOpen || now - this.lastClickTime < this.clickCooldownMs) return;
+  // End of old gestures
 
-    this.mouthIsOpen = true;
-    this.lastClickTime = now;
-    this.emitEvent({ timestamp: now, mode: 'head', position: pos, gesture: 'mouth_open', confidence: 1 });
+  private setLiveGesture(gesture: string) {
+    this.latestGesture = gesture;
+    setTimeout(() => {
+      if (this.latestGesture === gesture) this.latestGesture = 'None';
+    }, 1500);
   }
 
   public async pause(): Promise<void> {
     logger.info('HeadTracker', 'Pausing head tracker');
     this.status.state = 'paused';
     this.status.message = 'Tracking paused';
+    this.gestureMachine.pause();
   }
 
   public async resume(): Promise<void> {
     logger.info('HeadTracker', 'Resuming head tracker');
     this.status.state = 'active';
     this.status.message = 'Tracking active';
+    this.gestureMachine.resume();
     if (!this.requestAnimationFrameId) {
         this.detectLoop();
     }
@@ -373,6 +425,7 @@ export class HeadTracker implements ITracker {
     this.clearOverlay();
     this.status.state = 'idle';
     this.status.message = 'Tracking stopped';
+    this.gestureMachine.stop();
   }
 
   public async calibrate(): Promise<void> {

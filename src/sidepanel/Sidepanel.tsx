@@ -60,6 +60,11 @@ export const Sidepanel: React.FC = () => {
   // Live action status & pending human approval
   const [currentActionDescription, setCurrentActionDescription] = useState<string>('Ready for motion or voice inputs');
   const [pendingApproval, setPendingApproval] = useState<BrowserAction | null>(null);
+  const [gestureActionsEnabled, setGestureActionsEnabled] = useState<boolean>(false);
+  const [mouthClickEnabled, setMouthClickEnabled] = useState<boolean>(true);
+  const [tabNavEnabled, setTabNavEnabled] = useState<boolean>(true);
+  const [tiltNavEnabled, setTiltNavEnabled] = useState<boolean>(true);
+  const [previewOnly, setPreviewOnly] = useState<boolean>(false);
 
   // Task Memory / History
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
@@ -106,11 +111,19 @@ export const Sidepanel: React.FC = () => {
         const dY = document.getElementById('diag-y');
         const dCtrl = document.getElementById('diag-ctrl');
         const dContent = document.getElementById('diag-content');
+        const dGesture = document.getElementById('diag-gesture');
+        const dJaw = document.getElementById('diag-jaw');
+        const dMouthState = document.getElementById('diag-mouth-state');
+        const dTabState = document.getElementById('diag-tab-state');
         
         if (dRelYaw) dRelYaw.innerText = (headTracker.pose.relYaw || 0).toFixed(2);
         if (dRelPitch) dRelPitch.innerText = (headTracker.pose.relPitch || 0).toFixed(2);
         if (dX) dX.innerText = (headTracker.pose.targetX || 0).toFixed(2);
         if (dY) dY.innerText = (headTracker.pose.targetY || 0).toFixed(2);
+        if (dGesture) dGesture.innerText = headTracker.latestGestureOutput?.gestureLabel || 'None';
+        if (dJaw) dJaw.innerText = (headTracker.latestGestureOutput?.jawOpenScore || 0).toFixed(2);
+        if (dMouthState) dMouthState.innerText = headTracker.latestGestureOutput?.mouthState || 'IDLE';
+        if (dTabState) dTabState.innerText = headTracker.latestGestureOutput?.tabNavState || 'NEUTRAL';
         if (dCtrl) dCtrl.innerText = String(cursorController.diagnostics.receivedUpdates);
         if (dContent) {
           dContent.innerText = `${cursorController.diagnostics.contentDeliverySuccess} OK / ${cursorController.diagnostics.contentDeliveryFail} FAIL`;
@@ -192,6 +205,36 @@ export const Sidepanel: React.FC = () => {
         });
       });
     }
+  };
+
+  const handleToggleGestureActions = () => {
+    const newState = !gestureActionsEnabled;
+    setGestureActionsEnabled(newState);
+    cursorController.gestureActionsEnabled = newState;
+  };
+
+  const handleToggleMouthClick = () => {
+    const newState = !mouthClickEnabled;
+    setMouthClickEnabled(newState);
+    headTracker.configureGestures({ mouthClickEnabled: newState });
+  };
+
+  const handleToggleTabNav = () => {
+    const newState = !tabNavEnabled;
+    setTabNavEnabled(newState);
+    headTracker.configureGestures({ tabNavEnabled: newState });
+  };
+
+  const handleToggleTiltNav = () => {
+    const newState = !tiltNavEnabled;
+    setTiltNavEnabled(newState);
+    headTracker.configureGestures({ tiltNavEnabled: newState });
+  };
+
+  const handleTogglePreviewOnly = () => {
+    const newState = !previewOnly;
+    setPreviewOnly(newState);
+    headTracker.configureGestures({ previewOnly: newState });
   };
 
   // Execute an action safely with policy check
@@ -359,6 +402,17 @@ export const Sidepanel: React.FC = () => {
           
           {/* Cursor Diagnostics */}
           <div className="bg-slate-900/80 rounded p-2 border border-slate-700/60 mt-1 text-[10px] font-mono text-slate-400 space-y-1">
+             <div className="flex justify-between font-bold text-indigo-300 border-b border-slate-800 pb-1 mb-1">
+                <span>Gesture Preview:</span>
+                <span id="diag-gesture" className="text-white">None</span>
+             </div>
+             <div className="flex justify-between">
+                <span>Mouth State: <span id="diag-mouth-state" className="text-white">IDLE</span></span>
+                <span>Jaw: <span id="diag-jaw" className="text-white">0.00</span></span>
+             </div>
+             <div className="flex justify-between border-b border-slate-800 pb-1 mb-1">
+                <span>Tab State: <span id="diag-tab-state" className="text-white">NEUTRAL</span></span>
+             </div>
              <div className="flex justify-between">
                 <span>Rel Yaw: <span id="diag-rel-yaw" className="text-white">0.00</span>°</span>
                 <span>Rel Pitch: <span id="diag-rel-pitch" className="text-white">0.00</span>°</span>
@@ -408,8 +462,8 @@ export const Sidepanel: React.FC = () => {
 
       {/* Mode Selectors */}
       <div className="space-y-1.5">
-        <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-          Tracking Mode
+        <label className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex justify-between items-center">
+          <span>Tracking Mode</span>
         </label>
         <div className="grid grid-cols-2 gap-2 bg-slate-800/90 p-1 rounded-xl border border-slate-700">
           <button
@@ -432,6 +486,35 @@ export const Sidepanel: React.FC = () => {
           >
             👤 Head Mode
           </button>
+        </div>
+      </div>
+
+      {/* Gesture Controls */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+          Gesture Actions
+        </label>
+        <div className="grid grid-cols-2 gap-2 text-[10px] text-slate-300">
+          <label className="flex items-center space-x-1 cursor-pointer bg-slate-800/80 p-1.5 rounded border border-slate-700/60">
+            <input type="checkbox" className="accent-indigo-500" checked={gestureActionsEnabled} onChange={handleToggleGestureActions} />
+            <span>Master Actions</span>
+          </label>
+          <label className="flex items-center space-x-1 cursor-pointer bg-slate-800/80 p-1.5 rounded border border-slate-700/60">
+            <input type="checkbox" className="accent-indigo-500" checked={previewOnly} onChange={handleTogglePreviewOnly} />
+            <span>Preview Mode (No click/tab)</span>
+          </label>
+          <label className="flex items-center space-x-1 cursor-pointer bg-slate-800/80 p-1.5 rounded border border-slate-700/60">
+            <input type="checkbox" className="accent-indigo-500" checked={mouthClickEnabled} onChange={handleToggleMouthClick} />
+            <span>Mouth Click</span>
+          </label>
+          <label className="flex items-center space-x-1 cursor-pointer bg-slate-800/80 p-1.5 rounded border border-slate-700/60">
+            <input type="checkbox" className="accent-indigo-500" checked={tabNavEnabled} onChange={handleToggleTabNav} />
+            <span>Head Turn (Tabs)</span>
+          </label>
+          <label className="flex items-center space-x-1 cursor-pointer bg-slate-800/80 p-1.5 rounded border border-slate-700/60">
+            <input type="checkbox" className="accent-indigo-500" checked={tiltNavEnabled} onChange={handleToggleTiltNav} />
+            <span>Head Tilt (Undo/Redo)</span>
+          </label>
         </div>
       </div>
 
