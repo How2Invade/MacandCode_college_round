@@ -8,6 +8,8 @@ import { PointerPosition } from '../shared/types/tracking';
 import { BrowserAction } from '../shared/types/actions';
 import { logger } from '../shared/utils';
 
+let lastPointerDiagnosticAt = 0;
+
 if (!(window as any).__handsfreeInitialized) {
   (window as any).__handsfreeInitialized = true;
   logger.info('ContentScript', 'Handsfree content script loaded into page: ' + window.location.href);
@@ -29,6 +31,14 @@ if (!(window as any).__handsfreeInitialized) {
       cursorController.moveTo(pos);
       
       const debugInfo = cursorController.getDiagnostics();
+      if (Date.now() - lastPointerDiagnosticAt >= 1000) {
+        lastPointerDiagnosticAt = Date.now();
+        logger.info('ContentScript', 'Pointer update processed by cursor overlay.', {
+          accepted: cursorController.getVisibility(),
+          confidence: Number(pos.confidence.toFixed(3)),
+          stale: Date.now() - pos.timestamp > 500,
+        });
+      }
       logger.debug('ContentScript', 'Cursor diagnostics:', debugInfo);
       
       sendResponse({ ok: cursorController.getVisibility(), debug: debugInfo });
@@ -62,6 +72,28 @@ if (!(window as any).__handsfreeInitialized) {
 
         switch (action.type) {
           case 'click_element': {
+            if (action.targetId === 'cursor') {
+              const pos = cursorController.getPosition();
+              if (pos) {
+                const x = Math.max(0, Math.min(pos.x, 1)) * window.innerWidth;
+                const y = Math.max(0, Math.min(pos.y, 1)) * window.innerHeight;
+                
+                cursorController.hide(); // Hide cursor to prevent it from intercepting the click
+                const el = document.elementFromPoint(x, y) as HTMLElement;
+                if (el) {
+                  cursorController.triggerClickVisual('left');
+                  el.click();
+                  resultMessage = `Clicked element at cursor position`;
+                } else {
+                  throw new Error("No clickable element found under cursor");
+                }
+                cursorController.show();
+              } else {
+                throw new Error("Cursor position unavailable");
+              }
+              break;
+            }
+
             const el = resolveTarget(action.targetId);
             if (!el) return false; // Let another frame handle it
             el.click();

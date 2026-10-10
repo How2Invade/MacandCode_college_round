@@ -247,6 +247,31 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
               })
               .catch((e: any) => sendResponse({ success: false, message: e?.message || 'Navigation failed' }));
             return true;
+                    } else if (action.type === 'zoom_page') {
+            resolveTargetTab((message.payload as any).tabId, sender)
+              .then((res) => {
+                if (!res.tab?.id) return sendResponse({ success: false, message: res.error });
+                chrome.tabs.getZoom(res.tab.id, (currentZoom) => {
+                  const step = action.direction === 'in' ? 0.1 : -0.1;
+                  chrome.tabs.setZoom(res.tab.id!, Math.min(5, Math.max(0.25, currentZoom + step)), () => {
+                    sendResponse({ success: true, message: `Zoomed ${action.direction}`, tabId: res.tab.id });
+                  });
+                });
+              });
+            return true;
+          } else if (action.type === 'history_action') {
+            resolveTargetTab((message.payload as any).tabId, sender)
+              .then((res) => {
+                if (!res.tab?.id) return sendResponse({ success: false, message: res.error });
+                chrome.scripting.executeScript({
+                  target: { tabId: res.tab.id },
+                  func: (cmd: string) => document.execCommand(cmd),
+                  args: [action.command],
+                })
+                .then(() => sendResponse({ success: true, message: `Executed ${action.command}`, tabId: res.tab.id }))
+                .catch((e: any) => sendResponse({ success: false, message: e?.message || 'History action failed' }));
+              });
+            return true;
           } else if (action.type === 'switch_tab') {
             resolveTargetTab((message.payload as any).tabId, sender)
               .then(async (res) => {

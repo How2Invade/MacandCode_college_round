@@ -57,6 +57,16 @@ export const SwitchTabSchema = z.object({
   direction: z.enum(['next', 'previous']),
 });
 
+export const ZoomPageSchema = z.object({
+  type: z.literal('zoom_page'),
+  direction: z.enum(['in', 'out']),
+});
+
+export const HistoryActionSchema = z.object({
+  type: z.literal('history_action'),
+  command: z.enum(['undo', 'redo']),
+});
+
 export const ReadPageSchema = z.object({
   type: z.literal('read_page'),
 });
@@ -70,6 +80,8 @@ export const BrowserActionSchema = z.discriminatedUnion('type', [
   NavigateForwardSchema,
   SwitchTabSchema,
   ReadPageSchema,
+  ZoomPageSchema,
+  HistoryActionSchema,
 ]);
 
 export interface ValidationSuccess {
@@ -168,7 +180,7 @@ export class ActionPolicyEngine {
     // In 'auto' mode, only high/critical risk operations require explicit approval.
     const requiresApproval =
       mode === 'ask'
-        ? riskLevel !== 'low' || action.type === 'click_element' || action.type === 'type_text'
+        ? riskLevel !== 'low' || (action.type === 'click_element' && action.targetId !== 'cursor') || action.type === 'type_text'
         : riskLevel === 'high' || riskLevel === 'critical';
 
     return {

@@ -11,7 +11,9 @@ export type BrowserAction =
   | { type: "navigate_back" }
   | { type: "navigate_forward" }
   | { type: "switch_tab"; direction: "next" | "previous" }
-  | { type: "read_page" };
+  | { type: "read_page" }
+  | { type: "zoom_page"; direction: "in" | "out" }
+  | { type: "history_action"; command: "undo" | "redo" };
 
 export type ApprovalMode = "ask" | "auto";
 

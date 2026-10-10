@@ -31,9 +31,21 @@ export interface TrackingStatus {
 export type GestureType =
   | "none"
   | "pinch"
+  | "air_click"
   | "point"
   | "fist"
+  | "thumbs_up"
+  | "thumbs_down"
+  | "shaka"
   | "palm_open"
+  | "zoom_in"
+  | "zoom_out"
+  | "tab_next"
+  | "tab_previous"
+  | "scroll_up"
+  | "scroll_down"
+  | "undo"
+  | "redo"
   | "nod"
   | "shake"
   | "dwell";
@@ -46,6 +58,12 @@ export interface TrackingEvent {
   confidence: number;
 }
 
+/** Raw MediaPipe landmarks exposed only by trackers that support preview overlays. */
+export interface HandLandmarkerResult {
+  landmarks: { x: number; y: number; z: number; visibility?: number }[][];
+  handedness: { categoryName: string; score: number }[][];
+}
+
 export interface ITracker {
   initialize(): Promise<void>;
   start(mode?: TrackingMode): Promise<void>;
@@ -56,5 +74,6 @@ export interface ITracker {
   getStatus(): TrackingStatus;
   onPointerMove(listener: (pos: PointerPosition) => void): () => void;
   onTrackingEvent(listener: (event: TrackingEvent) => void): () => void;
+  onRawResult?(listener: (result: HandLandmarkerResult) => void): () => void;
   destroy(): Promise<void>;
 }

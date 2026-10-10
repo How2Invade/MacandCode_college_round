@@ -75,7 +75,7 @@ export class RealCursorController implements ICursorController {
       this.createCursor();
     }
     
-    const isStale = Date.now() - pos.timestamp > 500;
+    const isStale = Math.min(Math.abs(Date.now() - pos.timestamp), Math.abs(performance.now() - pos.timestamp)) > 500;
     const isLowConfidence = pos.confidence < 0.5;
 
     if (isStale || isLowConfidence) {
@@ -90,21 +90,21 @@ export class RealCursorController implements ICursorController {
       // Map normalized coordinates (0-1) to viewport dimensions
       const x = Math.max(0, Math.min(pos.x, 1)) * window.innerWidth;
       const y = Math.max(0, Math.min(pos.y, 1)) * window.innerHeight;
-      this.cursorElement.style.left = `${x}px`;
-      this.cursorElement.style.top = `${y}px`;
+      this.cursorElement.style.setProperty('left', `${x}px`, 'important');
+      this.cursorElement.style.setProperty('top', `${y}px`, 'important');
     }
   }
 
   public triggerClickVisual(button: 'left' | 'right' = 'left'): void {
     if (this.cursorElement) {
       const isRight = button === 'right';
-      this.cursorElement.style.transform = 'translate(-50%, -50%) scale(0.8)';
-      this.cursorElement.style.backgroundColor = isRight ? 'rgba(59, 130, 246, 0.9)' : 'rgba(239, 68, 68, 0.9)';
+      this.cursorElement.style.setProperty('transform', 'translate(-50%, -50%) scale(0.8)', 'important');
+      this.cursorElement.style.setProperty('background-color', isRight ? 'rgba(59, 130, 246, 0.9)' : 'rgba(239, 68, 68, 0.9)', 'important');
       
       setTimeout(() => {
         if (this.cursorElement) {
-          this.cursorElement.style.transform = 'translate(-50%, -50%)';
-          this.cursorElement.style.backgroundColor = 'rgba(16, 185, 129, 0.8)';
+          this.cursorElement.style.setProperty('transform', 'translate(-50%, -50%)', 'important');
+          this.cursorElement.style.setProperty('background-color', 'rgba(16, 185, 129, 0.8)', 'important');
         }
       }, 150);
     }

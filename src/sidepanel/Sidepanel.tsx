@@ -11,7 +11,10 @@ import {
   AssistantState,
   PointerPosition,
 } from '../shared/types';
-import { MockHandTracker } from '../tracking/hand/mockHandTracker';
+import { HandTracker } from '../tracking/hand/HandTracker';
+import { HAND_CONNECTIONS } from '../tracking/hand/landmarkConnections';
+import { actionForHandGesture } from '../tracking/hand/gestureActions';
+import type { CalibrationState } from '../tracking/hand/calibration/calibrationEngine';
 import { MockHeadTracker } from '../tracking/head/mockHeadTracker';
 import { defaultMockAiClient } from '../ai/mockAiClient';
 import { defaultMockTaskMemoryStore } from '../memory/mockTaskMemoryStore';
@@ -19,9 +22,50 @@ import { defaultChromeActionExecutor } from '../browser/chromeActionExecutor';
 import { defaultActionPolicy } from '../shared/safety/action-policy';
 import { WebSpeechRecognizer } from '../voice/webSpeechRecognizer';
 
-const handTracker = new MockHandTracker();
+// The real tracker owns the camera in hand mode. MockHandTracker remains
+// available as an exported fallback, but is not used for the live session.
+const handTracker = new HandTracker();
 const headTracker = new MockHeadTracker();
 const voiceRecognizer = new WebSpeechRecognizer();
+
+const INITIAL_CALIBRATION_STATE: CalibrationState = {
+  phase: 'idle', progress: 0, instruction: 'Calibration not started.', elapsedMs: 0, remainingMs: 0,
+};
+
+function drawHandSkeleton(canvas: HTMLCanvasElement, hands: Array<Array<{ x: number; y: number }>>): void {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const bounds = canvas.getBoundingClientRect();
+  const pixelRatio = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.round(bounds.width * pixelRatio));
+  const height = Math.max(1, Math.round(bounds.height * pixelRatio));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  ctx.clearRect(0, 0, bounds.width, bounds.height);
+
+  for (const hand of hands) {
+    ctx.strokeStyle = 'rgba(16, 185, 129, 0.9)';
+    ctx.lineWidth = 2;
+    for (const [start, end] of HAND_CONNECTIONS) {
+      const a = hand[start];
+      const b = hand[end];
+      if (!a || !b) continue;
+      ctx.beginPath();
+      ctx.moveTo(a.x * bounds.width, a.y * bounds.height);
+      ctx.lineTo(b.x * bounds.width, b.y * bounds.height);
+      ctx.stroke();
+    }
+    for (const landmark of hand) {
+      ctx.beginPath();
+      ctx.arc(landmark.x * bounds.width, landmark.y * bounds.height, 3.5, 0, 2 * Math.PI);
+      ctx.fillStyle = '#10B981';
+      ctx.fill();
+    }
+  }
+}
 
 export const Sidepanel: React.FC = () => {
   // Theme & App State
@@ -41,6 +85,11 @@ export const Sidepanel: React.FC = () => {
   const [cameraState, setCameraState] = useState<'off' | 'requesting' | 'live' | 'error'>('off');
   const [showSkeleton] = useState(true);
   const streamRef = useRef<MediaStream | null>(null);
+  const [handFeedback, setHandFeedback] = useState({ hands: 0, pointing: false, pointerActive: false, cursorDelivered: false, frames: 0, inferenceMs: 0 });
+  const [lastGesture, setLastGesture] = useState<string>('none');
+  const [calibrationState, setCalibrationState] = useState<CalibrationState>(INITIAL_CALIBRATION_STATE);
+  const calibrationInFlightRef = useRef(false);
+  const calibrationPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Settings
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask');
@@ -105,36 +154,89 @@ export const Sidepanel: React.FC = () => {
     return () => { unbindResult(); unbindError(); unbindEnd(); };
   }, []);
 
+  // Raw MediaPipe results drive the existing preview canvas. The preview and
+  // canvas are both mirrored by CSS, so raw normalized landmarks use the same
+  // coordinate orientation as Member 1's original implementation.
+  useEffect(() => {
+    let lastFeedbackUpdate = 0;
+    const unbindRaw = handTracker.onRawResult((result) => {
+      if (showSkeleton && canvasRef.current) {
+        drawHandSkeleton(canvasRef.current, result.landmarks);
+      }
+      if (Date.now() - lastFeedbackUpdate >= 200) {
+        lastFeedbackUpdate = Date.now();
+        const diagnostics = handTracker.getDiagnostics();
+        setHandFeedback((previous) => ({
+          ...previous,
+          hands: result.landmarks.filter((hand) => hand.length === 21).length,
+          pointing: diagnostics.pointing,
+          pointerActive: diagnostics.pointerActive,
+          frames: diagnostics.processedFrames,
+          inferenceMs: diagnostics.inferenceMs,
+        }));
+        setTrackingStatus(handTracker.getStatus());
+      }
+    });
+    return unbindRaw;
+  }, [showSkeleton]);
+
   // Tracking visualization binding
   useEffect(() => {
     const activeTracker = mode === 'hand' ? handTracker : headTracker;
+    let lastPipelineDiagnosticAt = 0;
+    const injectionInFlight = new Map<number, Promise<void>>();
+    const lastInjectionFailureAt = new Map<number, number>();
+    const logPipeline = (message: string, data?: Record<string, unknown>) => {
+      if (Date.now() - lastPipelineDiagnosticAt < 1_000) return;
+      lastPipelineDiagnosticAt = Date.now();
+      console.info(`[Handsfree][PointerPipeline] ${message}`, data ?? '');
+    };
+
+    const deliverPointer = async (tabId: number, pos: PointerPosition) => {
+      try {
+        const response = await chrome.tabs.sendMessage(tabId, { type: 'POINTER_POSITION_UPDATE', payload: pos });
+        if (mode === 'hand') setHandFeedback((previous) => ({ ...previous, cursorDelivered: response?.ok === true }));
+        logPipeline('Pointer delivered to content script.', { tabId, cursorVisible: response?.ok === true });
+      } catch (initialError) {
+        // Tabs open before an extension reload do not receive static content
+        // scripts again. Inject once on demand, then retry this same pointer.
+        try {
+          if (Date.now() - (lastInjectionFailureAt.get(tabId) ?? 0) < 1_000) {
+            throw initialError;
+          }
+          let injection = injectionInFlight.get(tabId);
+          if (!injection) {
+            injection = chrome.scripting.executeScript({
+              target: { tabId, allFrames: true },
+              files: ['content.js'],
+            }).then(() => undefined).finally(() => injectionInFlight.delete(tabId));
+            injectionInFlight.set(tabId, injection);
+          }
+          await injection;
+          const response = await chrome.tabs.sendMessage(tabId, { type: 'POINTER_POSITION_UPDATE', payload: pos });
+          if (mode === 'hand') setHandFeedback((previous) => ({ ...previous, cursorDelivered: response?.ok === true }));
+          logPipeline('Content script injected and pointer delivered.', { tabId, cursorVisible: response?.ok === true });
+        } catch (retryError) {
+          if (mode === 'hand') setHandFeedback((previous) => ({ ...previous, cursorDelivered: false }));
+          lastInjectionFailureAt.set(tabId, Date.now());
+          logPipeline('Pointer delivery failed; target cannot host the cursor.', {
+            tabId,
+            error: String(retryError || initialError),
+          });
+        }
+      }
+    };
+
     const unbindPointer = activeTracker.onPointerMove((pos: PointerPosition) => {
       // Send pointer updates to the active webpage
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         if (tabs[0]?.id) {
-          chrome.tabs.sendMessage(tabs[0].id, { type: 'POINTER_POSITION_UPDATE', payload: pos }).catch(() => {});
+          void deliverPointer(tabs[0].id, pos);
+        } else {
+          logPipeline('No active web tab was available for the pointer update.');
         }
       });
       
-      if (showSkeleton && canvasRef.current && videoRef.current && cameraState === 'live' && trackingStatus.state === 'active') {
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          // Scale normalized coordinates to canvas dimensions
-          const x = pos.x * canvas.width;
-          const y = pos.y * canvas.height;
-          
-          // Draw tracking point (placeholder for skeleton)
-          ctx.beginPath();
-          ctx.arc(x, y, 6, 0, 2 * Math.PI);
-          ctx.fillStyle = '#8bd6db'; // teal-ish accent
-          ctx.fill();
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 2;
-          ctx.stroke();
-        }
-      }
     });
     return () => { unbindPointer(); };
   }, [mode, showSkeleton, cameraState]);
@@ -157,6 +259,7 @@ export const Sidepanel: React.FC = () => {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      clearCalibrationPolling();
       stopCamera();
       handTracker.stop();
       headTracker.stop();
@@ -226,12 +329,71 @@ export const Sidepanel: React.FC = () => {
     setCameraState('off');
   };
 
+  const attachHandTrackerPreview = () => {
+    const trackerVideo = handTracker.getVideoElement();
+    if (!trackerVideo?.srcObject) {
+      throw new Error('Hand camera started without a video stream.');
+    }
+    if (videoRef.current) {
+      // This reuses the stream opened by HandTracker; do not request another
+      // camera stream for the side-panel preview.
+      videoRef.current.srcObject = trackerVideo.srcObject;
+    }
+    setCameraState('live');
+  };
+
+  const clearCalibrationPolling = () => {
+    if (calibrationPollRef.current) {
+      clearInterval(calibrationPollRef.current);
+      calibrationPollRef.current = null;
+    }
+  };
+
+  const handleCalibrate = async () => {
+    if (mode !== 'hand' || calibrationInFlightRef.current || trackingStatus.state !== 'active') return;
+    calibrationInFlightRef.current = true;
+    setCalibrationState(handTracker.getCalibrationState());
+    setCurrentActionDescription('Calibration started. Follow the instruction below.');
+    clearCalibrationPolling();
+    calibrationPollRef.current = setInterval(() => {
+      setCalibrationState(handTracker.getCalibrationState());
+    }, 200);
+
+    try {
+      await handTracker.calibrate();
+      setCalibrationState(handTracker.getCalibrationState());
+      setTrackingStatus(handTracker.getStatus());
+      setCurrentActionDescription('Hand calibration complete.');
+    } catch (err) {
+      setCalibrationState(handTracker.getCalibrationState());
+      setTrackingStatus(handTracker.getStatus());
+      setCurrentActionDescription(`Calibration error: ${(err as Error).message}`);
+    } finally {
+      calibrationInFlightRef.current = false;
+      clearCalibrationPolling();
+    }
+  };
+
   // Tracking Handlers
   const handleStart = async () => {
-    await startCamera();
-    const activeTracker = mode === 'hand' ? handTracker : headTracker;
-    await activeTracker.start(mode);
-    setTrackingStatus(activeTracker.getStatus());
+    try {
+      if (mode === 'hand') {
+        setCameraState('requesting');
+        await handTracker.start('hand');
+        attachHandTrackerPreview();
+        setTrackingStatus(handTracker.getStatus());
+        return;
+      }
+
+      await startCamera();
+      await headTracker.start('head');
+      setTrackingStatus(headTracker.getStatus());
+    } catch (err) {
+      console.error('[Tracking] Failed to start tracker:', err);
+      setCameraState('error');
+      const activeTracker = mode === 'hand' ? handTracker : headTracker;
+      setTrackingStatus(activeTracker.getStatus());
+    }
   };
 
   // @ts-ignore: preserved for underlying lifecycle logic
@@ -249,17 +411,51 @@ export const Sidepanel: React.FC = () => {
   };
 
   const handleStop = async () => {
+    clearCalibrationPolling();
     const activeTracker = mode === 'hand' ? handTracker : headTracker;
     await activeTracker.stop();
+    calibrationInFlightRef.current = false;
+    setCalibrationState(handTracker.getCalibrationState());
+    setHandFeedback({ hands: 0, pointing: false, pointerActive: false, cursorDelivered: false, frames: 0, inferenceMs: 0 });
     setTrackingStatus(activeTracker.getStatus());
     stopCamera();
   };
 
-  const handleModeChange = (newMode: TrackingMode) => {
+  const handleModeChange = async (newMode: TrackingMode) => {
+    if (newMode === mode) return;
+
+    const wasActive = trackingStatus.state === 'active' || trackingStatus.state === 'paused';
+    clearCalibrationPolling();
+    const previousTracker = mode === 'hand' ? handTracker : headTracker;
+    await previousTracker.stop();
+    calibrationInFlightRef.current = false;
+    setCalibrationState(handTracker.getCalibrationState());
+    setHandFeedback({ hands: 0, pointing: false, pointerActive: false, cursorDelivered: false, frames: 0, inferenceMs: 0 });
+    // Stops the head-mode stream and clears the preview. In hand mode the
+    // tracker has already released its own stream above.
+    stopCamera();
     setMode(newMode);
-    if (trackingStatus.state === 'active') {
+
+    if (!wasActive) {
+      setTrackingStatus((newMode === 'hand' ? handTracker : headTracker).getStatus());
+      return;
+    }
+
+    try {
+      if (newMode === 'hand') {
+        setCameraState('requesting');
+        await handTracker.start('hand');
+        attachHandTrackerPreview();
+        setTrackingStatus(handTracker.getStatus());
+      } else {
+        await startCamera();
+        await headTracker.start('head');
+        setTrackingStatus(headTracker.getStatus());
+      }
+    } catch (err) {
+      console.error('[Tracking] Failed to switch tracker mode:', err);
+      setCameraState('error');
       const activeTracker = newMode === 'hand' ? handTracker : headTracker;
-      activeTracker.start(newMode);
       setTrackingStatus(activeTracker.getStatus());
     }
   };
@@ -285,6 +481,35 @@ export const Sidepanel: React.FC = () => {
     setAssistantState(result.success ? 'success' : 'error');
     setCurrentActionDescription(result.message);
   };
+
+  const handleHandGesture = async (gesture: Parameters<typeof actionForHandGesture>[0]) => {
+    setLastGesture(gesture);
+
+    if (gesture === 'shaka') {
+      toggleListen();
+      setCurrentActionDescription(`Gesture recognized: shaka (toggled voice)`);
+      return;
+    }
+
+    const action = actionForHandGesture(gesture);
+    if (!action) {
+      setCurrentActionDescription(`Gesture recognized: ${gesture} (no approval-safe action mapped)`);
+      return;
+    }
+
+    const task = await defaultMockTaskMemoryStore.createTask(`Hand gesture: ${gesture}`, voiceLanguage);
+    await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
+    setActiveTaskId(task.id);
+    setTasks(await defaultMockTaskMemoryStore.listTasks());
+    await executeActionSafely(action, task.id);
+  };
+
+  useEffect(() => {
+    const unbindGesture = handTracker.onTrackingEvent((event) => {
+      void handleHandGesture(event.gesture);
+    });
+    return unbindGesture;
+  }, [voiceLanguage, approvalMode]);
 
   const handleApproveAction = async () => {
     if (!pendingApproval || !activeTaskId) return;
@@ -547,6 +772,34 @@ export const Sidepanel: React.FC = () => {
                     className="w-1/2"
                   />
                 </div>
+
+                {mode === 'hand' && (
+                  <div className="rounded-xl border border-hf-border dark:border-hf-dark-border p-3 space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-medium">Hand calibration</div>
+                        <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary">{calibrationState.instruction}</p>
+                      </div>
+                      <button
+                        onClick={handleCalibrate}
+                        disabled={trackingStatus.state !== 'active' || calibrationInFlightRef.current}
+                        className="shrink-0 px-3 py-1.5 rounded-lg text-[12px] font-bold bg-hf-teal text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {calibrationState.phase === 'sweeping' ? 'Calibrating…' : calibrationState.phase === 'complete' ? 'Calibrated' : 'Calibrate'}
+                      </button>
+                    </div>
+                    {calibrationState.phase === 'sweeping' && (
+                      <div className="space-y-1">
+                        <div className="h-1.5 rounded-full bg-gray-200 dark:bg-white/10 overflow-hidden">
+                          <div className="h-full bg-hf-teal transition-all" style={{ width: `${Math.round(calibrationState.progress * 100)}%` }} />
+                        </div>
+                        <div className="text-[10px] text-hf-text-secondary dark:text-hf-dark-text-secondary">Move your index fingertip across your comfortable working area.</div>
+                      </div>
+                    )}
+                    {calibrationState.phase === 'complete' && <div className="text-[11px] text-hf-teal font-semibold">Calibration complete — cursor bounds updated.</div>}
+                    {calibrationState.phase === 'failed' && <div className="text-[11px] text-red-500">Calibration stopped; default cursor bounds are active.</div>}
+                  </div>
+                )}
                 
                 <button onClick={handleClearHistory} className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-hf-red/10 rounded-lg">{t('clearHistory', interfaceLanguage)}</button>
                 {tasks.length > 0 && tasks.map(task => (
@@ -688,9 +941,9 @@ export const Sidepanel: React.FC = () => {
               {mode === 'hand' ? (
                 <div className="flex justify-around w-full max-w-sm text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary">
                   <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Point:</span><span>Move</span></div>
-                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Pinch:</span><span>Click</span></div>
-                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Fist:</span><span>Drag</span></div>
-                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Palm:</span><span>Reset</span></div>
+                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-text-primary">2 fingers:</span><span>Tab/Scroll</span></div>
+                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-text-primary">3 fingers:</span><span>Scroll</span></div>
+                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-text-primary">Air click:</span><span>Feedback</span></div>
                 </div>
               ) : (
                 <div className="flex justify-around w-full max-w-sm text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary">
@@ -746,6 +999,33 @@ export const Sidepanel: React.FC = () => {
                       <button className="absolute top-3 right-3 w-[26px] h-[26px] rounded-full bg-black/60 backdrop-blur-md text-white flex items-center justify-center hover:bg-black/80 transition">
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
                       </button>
+                      {mode === 'hand' && (
+                        <div className="absolute bottom-3 left-3 right-3 flex justify-between items-end">
+                          <div className="max-w-[calc(100%-85px)] bg-black/60 backdrop-blur-md text-white px-2.5 py-1.5 rounded-lg text-[10px] leading-relaxed shadow-sm">
+                            <div className="font-semibold">{handFeedback.hands > 0 ? `✋ ${handFeedback.hands} hand${handFeedback.hands === 1 ? '' : 's'} detected` : 'Show your hand to the camera'}</div>
+                            <div className="text-white/80">{handFeedback.pointing ? 'Pointing pose accepted' : 'Pointing pose waiting'} · {handFeedback.pointerActive ? 'Cursor streaming' : 'No pointer output'} · {handFeedback.cursorDelivered ? 'Overlay updated' : 'Overlay waiting'}</div>
+                            <div className="text-white/60">Frames {handFeedback.frames} · inference {handFeedback.inferenceMs.toFixed(0)}ms · gesture {lastGesture}</div>
+                          </div>
+                          <button
+                            onClick={handleCalibrate}
+                            disabled={trackingStatus.state !== 'active' || calibrationInFlightRef.current}
+                            className="shrink-0 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-gradient-to-br from-[#238F83] to-[#1A6B62] text-white shadow-md disabled:opacity-50 disabled:cursor-not-allowed hover:scale-105 transition active:scale-95"
+                          >
+                            {calibrationState.phase === 'sweeping' ? 'Calibrating…' : calibrationState.phase === 'complete' ? 'Calibrated' : 'Calibrate'}
+                          </button>
+                        </div>
+                      )}
+                      {calibrationState.phase !== 'idle' && calibrationState.phase !== 'complete' && (
+                        <div className="absolute inset-0 bg-black/50 backdrop-blur-sm flex flex-col items-center justify-center text-white z-20 space-y-3">
+                           <div className="w-12 h-12 bg-[#238F83] rounded-full flex items-center justify-center animate-pulse">
+                             <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
+                           </div>
+                           <div className="text-[14px] font-bold text-center px-4">{calibrationState.instruction}</div>
+                           <div className="w-2/3 bg-white/20 h-2 rounded-full overflow-hidden">
+                             <div className="bg-[#10b981] h-full transition-all duration-200" style={{ width: `${calibrationState.progress * 100}%` }} />
+                           </div>
+                        </div>
+                      )}
                     </>
                   )}
                 </>
