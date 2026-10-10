@@ -70,12 +70,31 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
 
       if (action?.type === 'undo') {
         document.execCommand('undo');
+        const active = document.activeElement || document.body;
+        const isMac = navigator.userAgent.includes('Mac');
+        active.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'z', code: 'KeyZ', keyCode: 90, bubbles: true, cancelable: true,
+          metaKey: isMac, ctrlKey: !isMac
+        }));
         sendResponse({ success: true, message: 'Executed undo.' } satisfies ActionResult);
         return true;
       }
 
       if (action?.type === 'redo') {
         document.execCommand('redo');
+        const active = document.activeElement || document.body;
+        const isMac = navigator.userAgent.includes('Mac');
+        active.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'z', code: 'KeyZ', keyCode: 90, bubbles: true, cancelable: true,
+          metaKey: isMac, ctrlKey: !isMac, shiftKey: true
+        }));
+        // Some Windows apps use Ctrl+Y
+        if (!isMac) {
+           active.dispatchEvent(new KeyboardEvent('keydown', {
+             key: 'y', code: 'KeyY', keyCode: 89, bubbles: true, cancelable: true,
+             ctrlKey: true
+           }));
+        }
         sendResponse({ success: true, message: 'Executed redo.' } satisfies ActionResult);
         return true;
       }
