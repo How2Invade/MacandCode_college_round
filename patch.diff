@@ -1,0 +1,51 @@
+--- src/sidepanel/Sidepanel.tsx
++++ src/sidepanel/Sidepanel.tsx
+@@ -731,6 +731,12 @@
+                           await new Promise(r => setTimeout(r, 200));
+                         }
+                         
++                        const task = await defaultMockTaskMemoryStore.createTask('Test Cursor Sequence', 'en');
++                        await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
++                        setCurrentActionDescription('Testing cursor coordinates...');
++                        setActiveTaskId(task.id);
++                        setTasks(await defaultMockTaskMemoryStore.listTasks());
++
+                         const points = [
+                           { x: 0.5, y: 0.5 }, // center
+                           { x: 0.1, y: 0.1 }, // top-left
+@@ -738,24 +744,30 @@
+                         ];
+                         
+                         for (const pt of points) {
++                          const action: any = { type: 'pointer_update', targetId: `x:${pt.x}, y:${pt.y}` };
++                          const step = await defaultMockTaskMemoryStore.addStep(task.id, action);
++                          
+                           const response = await chrome.tabs.sendMessage(tabId, {
+                             type: 'POINTER_POSITION_UPDATE',
+                             payload: { x: pt.x, y: pt.y, confidence: 1, timestamp: Date.now() }
+                           });
+                           if (!response || !response.ok) {
++                            await defaultMockTaskMemoryStore.recordStepResult(task.id, step, { success: false, message: 'Message delivery failed' });
+                             throw new Error('Message delivery failed');
+                           }
++                          await defaultMockTaskMemoryStore.recordStepResult(task.id, step, { success: true, message: `Moved to ${pt.x}, ${pt.y}` });
+                           await new Promise(r => setTimeout(r, 600));
+                         }
+                         
+-                        const task = await defaultMockTaskMemoryStore.createTask('Test Cursor Success', 'en');
+                         await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'completed');
++                        setCurrentActionDescription('Test completed successfully');
+                         setTasks(await defaultMockTaskMemoryStore.listTasks());
+-                        setActiveTaskId(task.id);
+                       } catch (err: any) {
+-                        const task = await defaultMockTaskMemoryStore.createTask('Test Cursor Failed: ' + err.message, 'en');
+-                        await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'failed');
+-                        setTasks(await defaultMockTaskMemoryStore.listTasks());
+-                        setActiveTaskId(task.id);
++                        const tid = activeTaskId;
++                        if (tid) await defaultMockTaskMemoryStore.updateTaskStatus(tid, 'failed');
++                        setCurrentActionDescription(`Failed: ${err.message}`);
++                        setTasks(await defaultMockTaskMemoryStore.listTasks());
+                       }
+                     }} 
+                     className="flex-1 h-[36px] bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/40 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 rounded-lg font-bold tracking-wide transition flex items-center justify-center shadow-sm"

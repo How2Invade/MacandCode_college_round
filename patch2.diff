@@ -1,0 +1,27 @@
+--- src/sidepanel/Sidepanel.tsx
++++ src/sidepanel/Sidepanel.tsx
+@@ -721,6 +721,7 @@
+                  </button>
+                  <button 
+                    onClick={async () => {
++                     let localTaskId: string | null = null;
+                      try {
+                        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+                        if (!tabs[0]?.id) throw new Error('No active tab found');
+@@ -737,6 +738,7 @@
+                        }
+                        
+                        const task = await defaultMockTaskMemoryStore.createTask('Test Cursor Sequence', 'en');
++                       localTaskId = task.id;
+                        await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
+                        setCurrentActionDescription('Testing cursor coordinates...');
+                        setActiveTaskId(task.id);
+@@ -769,7 +771,7 @@
+                        setCurrentActionDescription('Test completed successfully');
+                        setTasks(await defaultMockTaskMemoryStore.listTasks());
+                      } catch (err: any) {
+-                       let tid = activeTaskId;
++                       let tid = localTaskId || activeTaskId;
+                        if (!tid) {
+                          const t = await defaultMockTaskMemoryStore.createTask('Test Cursor Failed', 'en');
+                          tid = t.id;

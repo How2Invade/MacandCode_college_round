@@ -1,0 +1,903 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { t } from '../shared/i18n';
+import {
+  TrackingMode,
+  TrackingStatus,
+  SupportedLanguage,
+  SUPPORTED_LANGUAGES,
+  TaskRecord,
+  BrowserAction,
+  ApprovalMode,
+  AssistantState,
+  PointerPosition,
+} from '../shared/types';
+import { MockHandTracker } from '../tracking/hand/mockHandTracker';
+import { MockHeadTracker } from '../tracking/head/mockHeadTracker';
+import { defaultMockAiClient } from '../ai/mockAiClient';
+import { defaultMockTaskMemoryStore } from '../memory/mockTaskMemoryStore';
+import { defaultChromeActionExecutor } from '../browser/chromeActionExecutor';
+import { defaultActionPolicy } from '../shared/safety/action-policy';
+import { WebSpeechRecognizer } from '../voice/webSpeechRecognizer';
+
+const handTracker = new MockHandTracker();
+const headTracker = new MockHeadTracker();
+const voiceRecognizer = new WebSpeechRecognizer();
+
+export const Sidepanel: React.FC = () => {
+  // Theme & App State
+  const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system');
+  const [currentView, setCurrentView] = useState<'main' | 'settings' | 'history' | 'task_details'>('main');
+  const [viewedTaskId, setViewedTaskId] = useState<string | null>(null);
+
+  // Tracking
+  const [mode, setMode] = useState<TrackingMode>('hand');
+  const [trackingStatus, setTrackingStatus] = useState<TrackingStatus>({
+    mode: 'hand', state: 'idle', confidence: 0, message: 'Standby',
+  });
+
+  // Camera State
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [cameraState, setCameraState] = useState<'off' | 'requesting' | 'live' | 'error'>('off');
+  const [showSkeleton] = useState(true);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  // Settings
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask');
+  const [interfaceLanguage, setInterfaceLanguage] = useState<SupportedLanguage>('en');
+  const [voiceLanguage, setVoiceLanguage] = useState<SupportedLanguage>('en');
+  const [sensitivity, setSensitivity] = useState<number>(1.0);
+
+  // Voice State
+  const [voiceState, setVoiceState] = useState<'idle' | 'requesting' | 'listening' | 'processing' | 'recognized' | 'denied' | 'unsupported' | 'error'>('idle');
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+
+  // Assistant & Chat
+  const [assistantState, setAssistantState] = useState<AssistantState>('idle');
+  const [inputText, setInputText] = useState('');
+  
+  // Actions & Approval
+  const [currentActionDescription, setCurrentActionDescription] = useState<string>(t('tracking', interfaceLanguage) + '...');
+  const [pendingApproval, setPendingApproval] = useState<BrowserAction | null>(null);
+  
+  // Tasks & History
+  const [tasks, setTasks] = useState<TaskRecord[]>([]);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const activeTask = tasks.find(t => t.id === activeTaskId) || null;
+
+  // Theme Sync
+  useEffect(() => {
+    const applyTheme = () => {
+      const isDark = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      if (isDark) document.body.classList.add('dark');
+      else document.body.classList.remove('dark');
+    };
+    applyTheme();
+    const listener = () => { if (theme === 'system') applyTheme(); };
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    mq.addEventListener('change', listener);
+    return () => mq.removeEventListener('change', listener);
+  }, [theme]);
+
+  // Init Tasks & Voice Binding
+  useEffect(() => {
+    defaultMockTaskMemoryStore.listTasks().then(setTasks);
+
+    const unbindResult = voiceRecognizer.onResult((res) => {
+      setInputText(res.transcript);
+      if (res.isFinal) {
+        setVoiceState('recognized');
+      }
+    });
+    const unbindError = voiceRecognizer.onError((err) => {
+      if (err === 'not-allowed') setVoiceState('denied');
+      else {
+        setVoiceState('error');
+        setVoiceError(err);
+      }
+    });
+    const unbindEnd = voiceRecognizer.onEnd(() => {
+      setVoiceState(prev => (prev === 'listening' ? 'idle' : prev));
+    });
+
+    return () => { unbindResult(); unbindError(); unbindEnd(); };
+  }, []);
+
+  // Tracking visualization binding
+  useEffect(() => {
+    const activeTracker = mode === 'hand' ? handTracker : headTracker;
+    const unbindPointer = activeTracker.onPointerMove((pos: PointerPosition) => {
+      // Send pointer updates to the active webpage
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs[0]?.id) {
+          chrome.tabs.sendMessage(tabs[0].id, { type: 'POINTER_POSITION_UPDATE', payload: pos }).catch(() => {});
+        }
+      });
+      
+      if (showSkeleton && canvasRef.current && videoRef.current && cameraState === 'live' && trackingStatus.state === 'active') {
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          // Scale normalized coordinates to canvas dimensions
+          const x = pos.x * canvas.width;
+          const y = pos.y * canvas.height;
+          
+          // Draw tracking point (placeholder for skeleton)
+          ctx.beginPath();
+          ctx.arc(x, y, 6, 0, 2 * Math.PI);
+          ctx.fillStyle = '#8bd6db'; // teal-ish accent
+          ctx.fill();
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      }
+    });
+    return () => { unbindPointer(); };
+  }, [mode, showSkeleton, cameraState]);
+
+  // Adjust canvas size to match video
+  useEffect(() => {
+    if (cameraState === 'live' && videoRef.current && canvasRef.current) {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const updateSize = () => {
+        canvas.width = video.clientWidth;
+        canvas.height = video.clientHeight;
+      };
+      const timer = setTimeout(updateSize, 100);
+      window.addEventListener('resize', updateSize);
+      return () => { clearTimeout(timer); window.removeEventListener('resize', updateSize); };
+    }
+  }, [cameraState]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopCamera();
+      handTracker.stop();
+      headTracker.stop();
+    };
+  }, []);
+
+  // Camera lifecycle is now purely driven by Session Start/Stop
+
+  const startCamera = async () => {
+    console.log('[Camera Flow] startCamera called. Current state:', cameraState, 'Stream exists:', !!streamRef.current);
+    if (streamRef.current) {
+      console.log('[Camera Flow] Stream already exists. Returning early.');
+      return;
+    }
+    
+    try {
+      console.log('[Camera Flow] Setting state to requesting...');
+      setCameraState('requesting');
+      
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        console.error('[Camera Flow] navigator.mediaDevices.getUserMedia is not supported or not in a secure context.');
+        throw new Error('getUserMedia not supported in this context.');
+      }
+      
+      // Request audio first
+      try {
+        console.log('[Camera Flow] Requesting audio...');
+        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        console.log('[Camera Flow] Audio granted, stopping audio tracks immediately.');
+        audioStream.getTracks().forEach(track => track.stop());
+      } catch (e: any) {
+        console.warn('[Camera Flow] Audio request denied or failed:', e.name, e.message);
+      }
+
+      console.log('[Camera Flow] Requesting video...');
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      console.log('[Camera Flow] Video granted. Stream ID:', stream.id);
+      
+      streamRef.current = stream;
+      if (videoRef.current) {
+        console.log('[Camera Flow] Attaching stream to video element.');
+        videoRef.current.srcObject = stream;
+      } else {
+        console.warn('[Camera Flow] videoRef is null, cannot attach stream!');
+      }
+      
+      console.log('[Camera Flow] Setting state to live.');
+      setCameraState('live');
+    } catch (err: any) {
+      console.error('[Camera Flow] Video request failed!', err.name, err.message, err);
+      setCameraState('error');
+    }
+  };
+
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    if (canvasRef.current) {
+      const ctx = canvasRef.current.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    }
+    setCameraState('off');
+  };
+
+  // Tracking Handlers
+  const handleStart = async () => {
+    await startCamera();
+    const activeTracker = mode === 'hand' ? handTracker : headTracker;
+    await activeTracker.start(mode);
+    setTrackingStatus(activeTracker.getStatus());
+  };
+
+  const handlePause = async () => {
+    const activeTracker = mode === 'hand' ? handTracker : headTracker;
+    await activeTracker.pause();
+    setTrackingStatus(activeTracker.getStatus());
+  };
+
+  const handleResume = async () => {
+    const activeTracker = mode === 'hand' ? handTracker : headTracker;
+    await activeTracker.resume();
+    setTrackingStatus(activeTracker.getStatus());
+  };
+
+  const handleStop = async () => {
+    const activeTracker = mode === 'hand' ? handTracker : headTracker;
+    await activeTracker.stop();
+    setTrackingStatus(activeTracker.getStatus());
+    stopCamera();
+  };
+
+  const handleModeChange = (newMode: TrackingMode) => {
+    setMode(newMode);
+    if (trackingStatus.state === 'active') {
+      const activeTracker = newMode === 'hand' ? handTracker : headTracker;
+      activeTracker.start(newMode);
+      setTrackingStatus(activeTracker.getStatus());
+    }
+  };
+
+  // Actions & AI
+  const executeActionSafely = async (action: BrowserAction, taskId: string) => {
+    const decision = defaultActionPolicy.evaluate(action, approvalMode);
+    if (decision.requiresApproval) {
+      setAssistantState('awaiting_approval');
+      setPendingApproval(action);
+      setCurrentActionDescription(`${t('actionRequired', interfaceLanguage)}: ${action.type}`);
+      return;
+    }
+
+    setAssistantState('executing');
+    setCurrentActionDescription(`${t('tracking', interfaceLanguage)}: ${action.type}`);
+    const stepNumber = await defaultMockTaskMemoryStore.addStep(taskId, action);
+    const result = await defaultChromeActionExecutor.execute(action);
+    await defaultMockTaskMemoryStore.recordStepResult(taskId, stepNumber, result);
+    await defaultMockTaskMemoryStore.updateTaskStatus(taskId, result.success ? 'completed' : 'failed');
+    const updatedTasks = await defaultMockTaskMemoryStore.listTasks();
+    setTasks(updatedTasks);
+    setAssistantState(result.success ? 'success' : 'error');
+    setCurrentActionDescription(result.message);
+  };
+
+  const handleApproveAction = async () => {
+    if (!pendingApproval || !activeTaskId) return;
+    const action = pendingApproval;
+    setPendingApproval(null);
+    setAssistantState('executing');
+    
+    // Notify background script so it trusts the incoming execution request
+    await chrome.runtime.sendMessage({ type: 'APPROVE_ACTION', payload: { action } });
+    
+    const stepNumber = await defaultMockTaskMemoryStore.addStep(activeTaskId, action);
+    const result = await defaultChromeActionExecutor.execute(action);
+    await defaultMockTaskMemoryStore.recordStepResult(activeTaskId, stepNumber, result);
+    await defaultMockTaskMemoryStore.updateTaskStatus(activeTaskId, result.success ? 'completed' : 'failed');
+    const updatedTasks = await defaultMockTaskMemoryStore.listTasks();
+    setTasks(updatedTasks);
+    setAssistantState(result.success ? 'success' : 'error');
+    setCurrentActionDescription(result.message);
+  };
+
+  const handleRejectAction = async () => {
+    if (!pendingApproval || !activeTaskId) return;
+    const action = pendingApproval;
+    setPendingApproval(null);
+    setAssistantState('idle');
+    setCurrentActionDescription(t('cancel', interfaceLanguage));
+    
+    // Notify background
+    await chrome.runtime.sendMessage({ type: 'REJECT_ACTION', payload: { action } });
+    
+    const stepNumber = await defaultMockTaskMemoryStore.addStep(activeTaskId, action);
+    await defaultMockTaskMemoryStore.recordStepResult(activeTaskId, stepNumber, { success: false, message: 'Action rejected by user' });
+    await defaultMockTaskMemoryStore.updateTaskStatus(activeTaskId, 'cancelled');
+    const updatedTasks = await defaultMockTaskMemoryStore.listTasks();
+    setTasks(updatedTasks);
+    setActiveTaskId(null);
+  };
+
+  const handleSendMessage = async (overrideText?: string) => {
+    const textToProcess = overrideText || inputText;
+    if (!textToProcess.trim() || assistantState === 'thinking') return;
+    
+    if (voiceState === 'listening') {
+      await voiceRecognizer.stopListening();
+    }
+    setVoiceState('processing');
+    setAssistantState('thinking');
+    setCurrentActionDescription('...');
+    if (!overrideText) {
+      setInputText('');
+    }
+
+    try {
+      await defaultMockAiClient.sendMessage(textToProcess, voiceLanguage);
+      const plannedActions = await defaultMockAiClient.generatePlan(textToProcess, voiceLanguage);
+      const newTask = await defaultMockTaskMemoryStore.createTask(textToProcess, voiceLanguage);
+      setActiveTaskId(newTask.id);
+      
+      const updatedTasks = await defaultMockTaskMemoryStore.listTasks();
+      setTasks(updatedTasks);
+
+      if (plannedActions.length > 0) {
+        await executeActionSafely(plannedActions[0], newTask.id);
+      } else {
+        setAssistantState('success');
+        setCurrentActionDescription('...');
+        setActiveTaskId(null);
+      }
+      setVoiceState('idle');
+    } catch (err) {
+      setAssistantState('error');
+      setCurrentActionDescription(`Error: ${(err as Error).message}`);
+      setVoiceState('error');
+    }
+  };
+
+  const handleCancelTask = async () => {
+    if (activeTaskId) {
+      await defaultMockTaskMemoryStore.updateTaskStatus(activeTaskId, 'cancelled');
+      const updatedTasks = await defaultMockTaskMemoryStore.listTasks();
+      setTasks(updatedTasks);
+      setActiveTaskId(null);
+      setAssistantState('idle');
+      setPendingApproval(null);
+    }
+  };
+
+  const handleResumeTask = async (taskId: string) => {
+    setActiveTaskId(taskId);
+    await defaultMockTaskMemoryStore.updateTaskStatus(taskId, 'in_progress');
+    const updatedTasks = await defaultMockTaskMemoryStore.listTasks();
+    setTasks(updatedTasks);
+    setAssistantState('idle');
+    setCurrentView('main');
+  };
+
+  const handleClearHistory = async () => {
+    await defaultMockTaskMemoryStore.clearHistory();
+    setTasks([]);
+    setActiveTaskId(null);
+  };
+
+  const toggleListen = async () => {
+    if (voiceState === 'listening') {
+      await voiceRecognizer.stopListening();
+      return;
+    }
+    try {
+      setVoiceState('requesting');
+      setVoiceError(null);
+      setInputText('');
+      await voiceRecognizer.startListening(voiceLanguage);
+      setVoiceState('listening');
+    } catch (err: any) {
+      if (err.message.includes('not supported')) {
+        setVoiceState('unsupported');
+      } else {
+        setVoiceState('error');
+        setVoiceError(err.message);
+      }
+    }
+  };
+
+  return (
+    // Background matching the warm cream reference #f6f4ee
+    <div className="flex flex-col min-h-screen overflow-y-auto px-4 py-5 space-y-4 font-sans text-[#18181b] dark:text-[#f4f4f5] transition-colors duration-200 bg-[#f6f4ee] dark:bg-[#18181b] selection:bg-teal-500/20">
+      
+      {/* 1. Header with Official Logo */}
+      <div className="flex flex-col bg-white dark:bg-[#27272a] rounded-3xl p-4 shadow-[0_2px_12px_rgba(0,0,0,0.03)] border border-black/[0.04] dark:border-white/5 space-y-3 shrink-0">
+        <div className="flex justify-between items-start w-full">
+          <div className="flex space-x-3 items-center">
+            <div className="w-[52px] h-[52px] flex items-center justify-center shrink-0">
+              <img src="/icons/icon-128.png" alt="Handsfree Logo" className="w-full h-full object-contain" />
+            </div>
+            <div className="flex flex-col">
+              <h1 className="text-[20px] font-bold tracking-tight text-gray-900 dark:text-white leading-tight">Handsfree</h1>
+              <p className="text-[12px] text-gray-500 dark:text-gray-400 font-medium tracking-tight">{t('subtitle', interfaceLanguage)}</p>
+            </div>
+          </div>
+          <div className="flex space-x-1">
+            <button 
+              onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+              className="w-[36px] h-[36px] rounded-full bg-gray-50 hover:bg-gray-100 dark:bg-white/5 dark:hover:bg-white/10 transition flex items-center justify-center text-gray-500"
+            >
+              <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+            </button>
+            <button 
+              onClick={() => setCurrentView(currentView === 'settings' ? 'main' : 'settings')}
+              className="w-[36px] h-[36px] rounded-full bg-gray-50 hover:bg-gray-100 dark:bg-white/5 dark:hover:bg-white/10 transition flex items-center justify-center text-gray-500"
+            >
+              <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+      
+      {currentView === 'settings' && (
+        <div className="flex flex-col space-y-4 animate-in fade-in h-full pb-4">
+          <div className="bg-white dark:bg-[#27272a] rounded-3xl p-5 shadow-[0_2px_12px_rgba(0,0,0,0.03)] border border-black/[0.04]">
+             <h2 className="text-[14px] font-bold mb-4">{t('settings', interfaceLanguage)}</h2>
+             
+             <div className="space-y-4">
+                <div className="flex justify-between items-center px-1">
+                  <span className="text-sm font-medium">{t('interfaceLanguage', interfaceLanguage)}</span>
+                  <select 
+                    value={interfaceLanguage} 
+                    onChange={(e) => setInterfaceLanguage(e.target.value as SupportedLanguage)}
+                    className="text-[13px] font-semibold bg-gray-50 dark:bg-white/10 rounded-lg px-2 py-1 text-gray-700 dark:text-gray-200 outline-none border border-black/5"
+                  >
+                    {SUPPORTED_LANGUAGES.map(l => (
+                      <option key={l.code} value={l.code}>{l.nativeName}</option>
+                    ))}
+                  </select>
+                </div>
+                
+                <div className="flex justify-between items-center px-1">
+                  <span className="text-sm font-medium">{t('voiceLanguage', interfaceLanguage)}</span>
+                  <select 
+                    value={voiceLanguage} 
+                    onChange={(e) => setVoiceLanguage(e.target.value as SupportedLanguage)}
+                    className="text-[13px] font-semibold bg-gray-50 dark:bg-white/10 rounded-lg px-2 py-1 text-gray-700 dark:text-gray-200 outline-none border border-black/5"
+                  >
+                    {SUPPORTED_LANGUAGES.map(l => (
+                      <option key={l.code} value={l.code}>{l.nativeName}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex justify-between items-center px-1">
+                  <span className="text-sm font-medium">{t('actionApproval', interfaceLanguage)}</span>
+                  <select 
+                    value={approvalMode} 
+                    onChange={(e) => {
+                      const newMode = e.target.value as ApprovalMode;
+                      setApprovalMode(newMode);
+                      chrome.runtime.sendMessage({ type: 'SET_APPROVAL_MODE', payload: { mode: newMode } });
+                    }}
+                    className="text-[13px] font-semibold bg-gray-50 dark:bg-white/10 rounded-lg px-2 py-1 text-gray-700 dark:text-gray-200 outline-none border border-black/5"
+                  >
+                    <option value="ask">{t('ask', interfaceLanguage)}</option>
+                    <option value="auto">{t('auto', interfaceLanguage)}</option>
+                  </select>
+                </div>
+
+                <div className="flex justify-between items-center px-1">
+                  <span className="text-sm font-medium">{t('sensitivity', interfaceLanguage)}</span>
+                  <input 
+                    type="range" min="0.1" max="2.0" step="0.1" 
+                    value={sensitivity} 
+                    onChange={(e) => setSensitivity(parseFloat(e.target.value))}
+                    className="w-1/2"
+                  />
+                </div>
+                
+                <button onClick={handleClearHistory} className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg">{t('clearHistory', interfaceLanguage)}</button>
+                {tasks.length > 0 && tasks.map(task => (
+                  <div key={task.id} className="text-[12px] p-2 border-t border-gray-100 flex justify-between">
+                     <span>{task.goal}</span>
+                     <button onClick={() => handleResumeTask(task.id)} className="text-blue-500 font-medium">{t('resume', interfaceLanguage) || 'Resume'}</button>
+                  </div>
+                ))}
+             </div>
+
+             <button onClick={() => setCurrentView('main')} className="mt-4 px-4 py-2 bg-gray-100 dark:bg-white/10 rounded-lg text-sm font-medium w-full text-gray-900 dark:text-white">{t('back', interfaceLanguage)}</button>
+          </div>
+        </div>
+      )}
+
+      {currentView === 'history' && (
+        <div className="flex flex-col space-y-4 animate-in fade-in h-full pb-4">
+          <div className="bg-white dark:bg-[#27272a] rounded-3xl p-5 shadow-[0_2px_12px_rgba(0,0,0,0.03)] border border-black/[0.04]">
+             <div className="flex justify-between items-center mb-4">
+               <h2 className="text-[14px] font-bold">Task History</h2>
+               <button onClick={() => setCurrentView('main')} className="text-gray-400 hover:text-gray-700 font-medium text-sm">Close</button>
+             </div>
+             
+             <div className="space-y-3">
+               {tasks.length === 0 && <p className="text-sm text-gray-500 text-center py-4">No tasks yet.</p>}
+               {tasks.map(task => (
+                 <div key={task.id} className="p-3 bg-gray-50 dark:bg-white/5 rounded-xl border border-black/5 flex justify-between items-center cursor-pointer hover:bg-gray-100 dark:hover:bg-white/10 transition" onClick={() => { setViewedTaskId(task.id); setCurrentView('task_details'); }}>
+                   <div className="flex flex-col flex-1 min-w-0 pr-2">
+                     <span className="font-bold text-[13px] truncate text-gray-900 dark:text-white">{task.goal}</span>
+                     <span className="text-[11px] text-gray-500 capitalize">{task.status} • {new Date(task.createdAt).toLocaleTimeString()}</span>
+                   </div>
+                   <div className="flex items-center space-x-2 shrink-0">
+                     <span className={`w-2 h-2 rounded-full ${task.status === 'completed' ? 'bg-green-500' : task.status === 'failed' ? 'bg-red-500' : task.status === 'in_progress' ? 'bg-blue-500' : 'bg-gray-400'}`}></span>
+                     <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 5l7 7-7 7"></path></svg>
+                   </div>
+                 </div>
+               ))}
+             </div>
+             <button onClick={() => setCurrentView('main')} className="mt-4 px-4 py-2 bg-gray-100 dark:bg-white/10 rounded-lg text-sm font-medium w-full text-gray-900 dark:text-white">{t('back', interfaceLanguage)}</button>
+          </div>
+        </div>
+      )}
+
+      {currentView === 'task_details' && viewedTaskId && (
+        <div className="flex flex-col space-y-4 animate-in fade-in h-full pb-4">
+          <div className="bg-white dark:bg-[#27272a] rounded-3xl p-5 shadow-[0_2px_12px_rgba(0,0,0,0.03)] border border-black/[0.04]">
+             <div className="flex items-center mb-4 space-x-3">
+               <button onClick={() => setCurrentView(activeTask?.id === viewedTaskId ? 'main' : 'history')} className="w-8 h-8 rounded-full bg-gray-50 hover:bg-gray-100 dark:bg-white/5 dark:hover:bg-white/10 flex items-center justify-center transition shrink-0">
+                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15 19l-7-7 7-7"></path></svg>
+               </button>
+               <h2 className="text-[14px] font-bold">Task Details</h2>
+             </div>
+             
+             {(() => {
+                const task = tasks.find(t => t.id === viewedTaskId);
+                if (!task) return <div className="text-sm text-gray-500">Task not found</div>;
+                return (
+                  <div className="space-y-4">
+                    <div className="flex flex-col">
+                      <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Goal</span>
+                      <span className="text-[14px] font-bold text-gray-900 dark:text-white break-words">{task.goal}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <div className="flex flex-col">
+                        <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Status</span>
+                        <div className="flex items-center space-x-1.5">
+                          <span className={`w-2 h-2 rounded-full ${task.status === 'completed' ? 'bg-green-500' : task.status === 'failed' ? 'bg-red-500' : task.status === 'in_progress' ? 'bg-blue-500' : 'bg-gray-400'}`}></span>
+                          <span className="text-[13px] font-semibold capitalize text-gray-700 dark:text-gray-200">{task.status}</span>
+                        </div>
+                      </div>
+                      <div className="flex flex-col text-right">
+                        <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Created</span>
+                        <span className="text-[13px] font-medium text-gray-700 dark:text-gray-200">{new Date(task.createdAt).toLocaleTimeString()}</span>
+                      </div>
+                    </div>
+                    
+                    {task.status === 'failed' && currentActionDescription.startsWith('Failed:') && task.id === activeTaskId && (
+                      <div className="p-3 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 rounded-xl text-[12px] font-medium break-words mt-3">
+                        {currentActionDescription}
+                      </div>
+                    )}
+                    
+                    <div className="pt-2">
+                      <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2 block">Steps History</span>
+                      <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+                        {task.steps && task.steps.length > 0 ? task.steps.map((step, idx) => (
+                          <div key={idx} className="bg-gray-50 dark:bg-white/5 rounded-xl p-3 text-[12px]">
+                            <div className="font-semibold text-gray-900 dark:text-white mb-1 uppercase tracking-wider text-[10px]">Action {idx + 1}</div>
+                            <div className="font-bold text-gray-800 dark:text-gray-200 mb-1">{step.action.type}</div>
+                            {step.result && (
+                              <div className={`mt-1 font-medium break-words ${step.result.success ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                                {step.result.message}
+                              </div>
+                            )}
+                          </div>
+                        )) : (
+                          <div className="text-[12px] text-gray-500 italic">No steps recorded yet.</div>
+                        )}
+                      </div>
+                    </div>
+
+                    {task.status === 'in_progress' && task.id === activeTask?.id && (
+                      <button onClick={handleCancelTask} className="mt-4 px-4 py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg text-sm font-bold w-full transition shadow-sm">Stop Task</button>
+                    )}
+                  </div>
+                );
+             })()}
+          </div>
+        </div>
+      )}
+
+      {currentView === 'main' && (
+        <>
+          {/* 2. Tracking Mode Selector */}
+          <div className="flex items-center justify-between shrink-0 px-1">
+            <div className="flex bg-[#e8e4db] dark:bg-white/10 rounded-full p-[3px] space-x-1 shadow-inner">
+              <button onClick={() => handleModeChange('hand')} className={`flex items-center space-x-1.5 px-4 py-2 text-[14px] font-semibold rounded-full transition-all ${mode === 'hand' ? 'bg-white dark:bg-[#323235] text-[#10b981] shadow-sm border border-black/5 dark:border-white/10' : 'text-gray-600 dark:text-gray-300 hover:text-gray-900'}`}>
+                <svg className="w-4 h-4 opacity-80" fill="currentColor" viewBox="0 0 24 24"><path d="M21.2 9.5c-.3-.3-.7-.5-1.1-.6-.4-.1-.8-.1-1.2 0-.2 0-.5.1-.7.2l-.7-3.2c-.1-.5-.4-.9-.9-1.2-.5-.2-1-.3-1.5-.1-.5.1-.9.5-1.2 1-.2.4-.2.8-.2 1.3V9c-.1-.2-.3-.5-.5-.6-.3-.2-.6-.3-1-.3-.4 0-.8.1-1.1.4-.4.3-.6.7-.6 1.1v3.2L9.3 12c-.3-.2-.7-.3-1-.3-.4 0-.8.1-1.1.4-.5.4-.7 1-.5 1.5l1.6 5.8c.4 1.5 1.8 2.5 3.3 2.5h2.1c2 0 3.8-1.2 4.6-3L21 12.3c.4-1 .3-2-.2-2.8z"/></svg>
+                <span>{t('hand', interfaceLanguage)}</span>
+              </button>
+              <button onClick={() => handleModeChange('head')} className={`flex items-center space-x-1.5 px-4 py-2 text-[14px] font-semibold rounded-full transition-all ${mode === 'head' ? 'bg-white dark:bg-[#323235] text-[#10b981] shadow-sm border border-black/5 dark:border-white/10' : 'text-gray-600 dark:text-gray-300 hover:text-gray-900'}`}>
+                <svg className="w-4 h-4 opacity-80" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C8.1 2 5 5.1 5 9c0 2.4 1.2 4.5 3 5.7V17c0 .6.4 1 1 1h6c.6 0 1-.4 1-1v-2.3c1.8-1.2 3-3.3 3-5.7 0-3.9-3.1-7-7-7zm0 2c2.8 0 5 2.2 5 5 0 2-.1 4-2 5v2H9v-2c-1.9-1-2-3-2-5 0-2.8 2.2-5 5-5z"/></svg>
+                <span>{t('head', interfaceLanguage)}</span>
+              </button>
+            </div>
+            
+            <div className="flex items-center bg-white dark:bg-[#27272a] rounded-full px-3 py-2 shadow-sm border border-black/5 space-x-2">
+               <span className={`w-2 h-2 rounded-full ${trackingStatus.state === 'active' ? 'bg-[#10b981]' : trackingStatus.state === 'error' ? 'bg-red-500' : 'bg-gray-300'}`}></span>
+               <span className="text-[13px] font-semibold text-gray-700 dark:text-gray-200">{t('tracking', interfaceLanguage)}</span>
+            </div>
+          </div>
+
+          {/* 3. Live Camera Preview Card */}
+          <div className="bg-white dark:bg-[#27272a] rounded-3xl p-3 shadow-[0_2px_12px_rgba(0,0,0,0.03)] border border-black/[0.04] flex flex-col space-y-3 shrink-0">
+            <div className="relative w-full aspect-[4/3] bg-black/5 dark:bg-black/20 rounded-2xl overflow-hidden flex items-center justify-center">
+              {cameraState === 'error' ? (
+                <div className="flex flex-col items-center p-6 text-center space-y-3">
+                  <div className="w-10 h-10 bg-red-100 text-red-500 rounded-full flex items-center justify-center">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                  </div>
+                  <h3 className="text-[14px] font-semibold text-gray-900 dark:text-white tracking-tight">{t('cameraDenied', interfaceLanguage)}</h3>
+                  <p className="text-[12px] text-gray-500">{t('cameraDeniedDesc', interfaceLanguage)}</p>
+                  <button onClick={startCamera} className="mt-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 dark:bg-white/10 dark:hover:bg-white/20 text-[13px] font-bold rounded-lg transition">{t('retryCamera', interfaceLanguage)}</button>
+                </div>
+              ) : cameraState === 'off' ? (
+                <div className="flex flex-col items-center text-center space-y-2 opacity-60">
+                   <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                   <span className="text-[13px] font-semibold tracking-tight">{t('cameraOff', interfaceLanguage)}</span>
+                </div>
+              ) : (
+                <>
+                  <video 
+                    ref={videoRef} 
+                    autoPlay 
+                    playsInline 
+                    muted 
+                    className={`w-full h-full object-cover transform -scale-x-100 ${cameraState === 'live' ? 'opacity-100' : 'opacity-0'}`} 
+                  />
+                  <canvas 
+                    ref={canvasRef} 
+                    className={`absolute top-0 left-0 w-full h-full pointer-events-none transform -scale-x-100`}
+                  />
+                  {cameraState === 'requesting' && (
+                     <div className="absolute text-white/70 text-[13px] font-semibold animate-pulse tracking-tight">...</div>
+                  )}
+                  {cameraState === 'live' && (
+                    <>
+                      <div className="absolute top-3 left-3 bg-black/60 backdrop-blur-md text-white px-2.5 py-1 rounded-full text-[11px] font-semibold tracking-wide flex items-center space-x-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-[#10b981]"></span>
+                        <span>{t('cameraLive', interfaceLanguage)}</span>
+                      </div>
+                      <button className="absolute top-3 right-3 w-[26px] h-[26px] rounded-full bg-black/60 backdrop-blur-md text-white flex items-center justify-center hover:bg-black/80 transition">
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
+                      </button>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* 4. Session Controls */}
+          <div className="flex flex-col space-y-3 px-1 pt-2 shrink-0">
+             <div className="flex space-x-2">
+               <button onClick={handleStart} className="flex-1 h-[48px] bg-[#fdfbf7] dark:bg-[#27272a] hover:bg-gray-50 dark:hover:bg-[#3f3f46] border border-[#10b981] dark:border-[#10b981]/50 text-[#27272a] dark:text-white rounded-xl font-bold tracking-wide transition active:scale-[0.98] flex items-center justify-center space-x-1.5 shadow-sm">
+                 <svg className="w-4 h-4 text-[#10b981] shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                 <span className="text-[14px] truncate">{t('startSession', interfaceLanguage)}</span>
+               </button>
+               <button onClick={trackingStatus.state === 'paused' ? handleResume : handlePause} className="flex-1 h-[48px] bg-[#fbf6ec] dark:bg-[#27272a] hover:bg-[#f0ece2] dark:hover:bg-[#3f3f46] border border-[#e5e0d8] dark:border-white/10 shadow-sm text-gray-800 dark:text-white rounded-xl font-bold flex items-center justify-center space-x-1.5 transition active:scale-[0.98]">
+                 {trackingStatus.state === 'paused' ? (
+                   <>
+                     <svg className="w-4 h-4 shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                     <span className="text-[14px] truncate">Resume</span>
+                   </>
+                 ) : (
+                   <>
+                     <svg className="w-4 h-4 shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                     <span className="text-[14px] truncate">Pause</span>
+                   </>
+                 )}
+               </button>
+               <button onClick={handleStop} className="flex-1 h-[48px] bg-[#fbf6ec] dark:bg-[#27272a] hover:bg-[#fef2f2] dark:hover:bg-[#451a1a] border border-red-500/50 dark:border-red-500/50 text-[#27272a] dark:text-white rounded-xl font-bold flex items-center justify-center space-x-1.5 transition active:scale-[0.98] shadow-sm">
+                 <svg className="w-4 h-4 text-red-500 shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
+                 <span className="text-[14px] truncate">Stop</span>
+               </button>
+             </div>
+             
+             {/* Show Test Approval and Test Cursor only in unpacked extensions (development mode) */}
+             {(typeof chrome !== 'undefined' && chrome.runtime?.getManifest && !('update_url' in chrome.runtime.getManifest())) && (
+               <div className="flex space-x-2 pt-2 border-t border-gray-200 dark:border-white/10 mt-2">
+                 <button 
+                   onClick={async () => {
+                     const task = await defaultMockTaskMemoryStore.createTask('Test Approval', 'en');
+                     await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
+                     const updatedTasks = await defaultMockTaskMemoryStore.listTasks();
+                     setTasks(updatedTasks);
+                     setActiveTaskId(task.id);
+                     executeActionSafely({ type: 'click_element', targetId: 'h1' }, task.id);
+                   }} 
+                   className="flex-1 h-[36px] bg-purple-50 dark:bg-purple-900/20 hover:bg-purple-100 dark:hover:bg-purple-900/40 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 rounded-lg font-bold tracking-wide transition flex items-center justify-center shadow-sm"
+                 >
+                   <span className="text-[13px]">Test Approval</span>
+                 </button>
+                 <button 
+                   onClick={async () => {
+                     try {
+                       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+                       if (!tabs[0]?.id) throw new Error('No active tab found');
+                       const tabId = tabs[0].id;
+                       
+                       // Ensure content script is ready
+                       try {
+                         await chrome.tabs.sendMessage(tabId, { type: 'CONTENT_PING' });
+                       } catch (e) {
+                         // Receiving end does not exist, try to inject
+                         await chrome.scripting.executeScript({
+                           target: { tabId },
+                           files: ['content.js']
+                         });
+                         // Give it a moment to initialize
+                         await new Promise(r => setTimeout(r, 200));
+                       }
+                       
+                       const task = await defaultMockTaskMemoryStore.createTask('Test Cursor Sequence', 'en');
+                       await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
+                       setCurrentActionDescription('Testing cursor coordinates...');
+                       setActiveTaskId(task.id);
+                       setTasks(await defaultMockTaskMemoryStore.listTasks());
+
+                       const points = [
+                         { x: 0.5, y: 0.5 }, // center
+                         { x: 0.1, y: 0.1 }, // top-left
+                         { x: 0.9, y: 0.9 }, // bottom-right
+                       ];
+                       
+                       for (const pt of points) {
+                         const action: any = { type: 'pointer_update', targetId: `x:${pt.x}, y:${pt.y}` };
+                         const step = await defaultMockTaskMemoryStore.addStep(task.id, action);
+                         
+                         const response = await chrome.tabs.sendMessage(tabId, {
+                           type: 'POINTER_POSITION_UPDATE',
+                           payload: { x: pt.x, y: pt.y, confidence: 1, timestamp: Date.now() }
+                         });
+                         
+                         const debugStr = response?.debug ? JSON.stringify(response.debug) : 'No debug info';
+                         if (!response || !response.ok) {
+                           await defaultMockTaskMemoryStore.recordStepResult(task.id, step, { success: false, message: 'Message delivery failed or cursor hidden. Debug: ' + debugStr });
+                           throw new Error('Message delivery failed or cursor hidden. Debug: ' + debugStr);
+                         }
+                         
+                         await defaultMockTaskMemoryStore.recordStepResult(task.id, step, { success: true, message: `Moved to ${pt.x}, ${pt.y}. Diagnostics: ${debugStr}` });
+                         await new Promise(r => setTimeout(r, 600));
+                       }
+                       
+                       await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'completed');
+                       setCurrentActionDescription('Test completed successfully');
+                       setTasks(await defaultMockTaskMemoryStore.listTasks());
+                     } catch (err: any) {
+                       let tid = activeTaskId;
+                       if (!tid) {
+                         const t = await defaultMockTaskMemoryStore.createTask('Test Cursor Failed', 'en');
+                         tid = t.id;
+                         setActiveTaskId(tid);
+                       }
+                       const action: any = { type: 'system_error', targetId: 'Test Cursor' };
+                       const step = await defaultMockTaskMemoryStore.addStep(tid, action);
+                       await defaultMockTaskMemoryStore.recordStepResult(tid, step, { success: false, message: err.message });
+                       await defaultMockTaskMemoryStore.updateTaskStatus(tid, 'failed');
+                       setCurrentActionDescription(`Failed: ${err.message}`);
+                       setTasks(await defaultMockTaskMemoryStore.listTasks());
+                     }
+                   }} 
+                   className="flex-1 h-[36px] bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/40 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 rounded-lg font-bold tracking-wide transition flex items-center justify-center shadow-sm"
+                 >
+                   <span className="text-[13px]">Test Cursor</span>
+                 </button>
+               </div>
+             )}
+             
+             <p className="text-[13px] text-gray-500 font-medium px-1 leading-snug pt-2">{t('startSessionDesc', interfaceLanguage)}</p>
+          </div>
+
+          {/* 5. Active Task */}
+          <div className="bg-white dark:bg-[#27272a] rounded-3xl p-4 shadow-[0_2px_12px_rgba(0,0,0,0.03)] border border-black/[0.04] flex flex-col shrink-0">
+            <div className="flex justify-between items-center mb-3">
+              <div className="flex items-center space-x-2">
+                <div className="w-5 h-5 bg-yellow-100 text-yellow-600 rounded flex items-center justify-center">
+                  <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                </div>
+                <h3 className="font-bold text-[15px] tracking-tight text-gray-900 dark:text-white">{t('activeTask', interfaceLanguage)}</h3>
+              </div>
+              <button onClick={() => setCurrentView('history')} className="text-[13px] font-semibold text-gray-500 hover:text-gray-800 transition">{t('viewAll', interfaceLanguage)}</button>
+            </div>
+            
+            {activeTask ? (
+              <div className="flex flex-col space-y-3">
+                <div className="flex items-center bg-gray-50 dark:bg-white/5 rounded-2xl p-3 border border-black/5">
+                  {(assistantState === 'thinking' || assistantState === 'executing') ? (
+                    <div className="w-[42px] h-[42px] rounded-full border-[3px] border-gray-200 dark:border-white/10 border-t-[#10b981] animate-spin shrink-0"></div>
+                  ) : (assistantState === 'error' || activeTask.status === 'failed') ? (
+                    <div className="w-[42px] h-[42px] rounded-full bg-red-100 text-red-500 shrink-0 flex items-center justify-center font-bold">!</div>
+                  ) : (activeTask.status === 'completed' || assistantState === 'success') ? (
+                    <div className="w-[42px] h-[42px] rounded-full bg-green-100 text-green-500 shrink-0 flex items-center justify-center font-bold">✓</div>
+                  ) : (
+                    <div className="w-[42px] h-[42px] rounded-full bg-gray-200 dark:bg-white/10 shrink-0 flex items-center justify-center text-gray-400 font-bold">-</div>
+                  )}
+                  <div className="flex flex-col ml-3 flex-1 min-w-0">
+                    <span className="font-bold text-[14px] text-gray-900 dark:text-white truncate">{activeTask.goal}</span>
+                    <span className="text-[12px] font-medium text-gray-500 truncate mt-0.5">• {currentActionDescription}</span>
+                  </div>
+                  <button onClick={() => { setViewedTaskId(activeTask.id); setCurrentView('task_details'); }} className="w-7 h-7 flex items-center justify-center text-gray-400 mx-2 hover:bg-gray-200 dark:hover:bg-white/10 rounded-full transition">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 5l7 7-7 7"></path></svg>
+                  </button>
+                  <button onClick={handleCancelTask} className="px-3 py-1.5 bg-red-50 hover:bg-red-100 dark:bg-red-500/10 text-red-500 text-[13px] font-bold rounded-lg transition shrink-0">{t('cancel', interfaceLanguage)}</button>
+                </div>
+                
+                {pendingApproval && (
+                  <div className="p-3 bg-yellow-50 dark:bg-yellow-900/10 border border-yellow-200/50 dark:border-yellow-900/30 rounded-xl space-y-2 mt-2 shadow-sm animate-in slide-in-from-bottom-2">
+                    <h4 className="font-semibold text-[11px] uppercase tracking-wider text-yellow-800 dark:text-yellow-500">{t('actionRequired', interfaceLanguage)}</h4>
+                    <p className="text-[12px] opacity-90 text-yellow-900 dark:text-yellow-200 break-words">
+                      {pendingApproval.type}
+                    </p>
+                    <div className="flex space-x-2 pt-1">
+                      <button onClick={handleApproveAction} className="flex-1 py-1.5 bg-green-600 hover:bg-green-700 text-white font-medium rounded-lg text-[13px] shadow-sm transition">{t('confirm', interfaceLanguage)}</button>
+                      <button onClick={handleRejectAction} className="flex-1 py-1.5 bg-white dark:bg-[#2c2c2e] hover:bg-gray-50 dark:hover:bg-[#3a3a3c] text-[#1d1d1f] dark:text-white font-medium rounded-lg text-[13px] border border-black/10 dark:border-white/10 transition">{t('cancel', interfaceLanguage)}</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-[13px] font-medium text-gray-400 text-center py-2">{t('noActiveTask', interfaceLanguage)}</div>
+            )}
+          </div>
+
+          {/* 6. Voice Command Composer */}
+          <div className="bg-white dark:bg-[#27272a] rounded-3xl p-4 shadow-[0_2px_12px_rgba(0,0,0,0.03)] border border-black/[0.04] shrink-0 space-y-4">
+             <div className="flex justify-between items-center">
+               <div className="flex items-center space-x-2">
+                 <div className="w-5 h-5 bg-gray-100 dark:bg-white/10 text-gray-600 dark:text-white rounded flex items-center justify-center">
+                   <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+                 </div>
+                 <h3 className="font-bold text-[15px] tracking-tight text-gray-900 dark:text-white">{t('voiceCommand', interfaceLanguage)}</h3>
+               </div>
+               <div className="flex items-center space-x-1">
+                 <select 
+                    value={voiceLanguage} 
+                    onChange={(e) => setVoiceLanguage(e.target.value as SupportedLanguage)}
+                    className="text-[12px] font-semibold bg-gray-50 dark:bg-white/10 px-2 py-1 rounded text-gray-500 uppercase outline-none"
+                  >
+                    {SUPPORTED_LANGUAGES.map(l => (
+                      <option key={l.code} value={l.code}>{l.nativeName}</option>
+                    ))}
+                 </select>
+               </div>
+             </div>
+
+             <div className="relative w-full h-[120px] bg-[#fcfcfc] dark:bg-[#323235] border border-gray-200 dark:border-white/10 rounded-2xl flex flex-col p-4 transition-colors">
+               <span className="text-gray-400 text-[18px] font-medium tracking-tight">{t('sayCommand', interfaceLanguage)}</span>
+               <button onClick={toggleListen} className={`absolute bottom-4 right-4 w-[42px] h-[42px] rounded-full flex items-center justify-center transition shadow-md ${voiceState === 'listening' ? 'bg-red-500 text-white animate-pulse shadow-red-500/30' : 'bg-[#10b981] text-white hover:bg-[#059669]'}`}>
+                 <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+               </button>
+             </div>
+
+             <div className="flex items-center pt-2">
+               <input 
+                 type="text" 
+                 value={inputText}
+                 onChange={(e) => setInputText(e.target.value)}
+                 onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                 placeholder={t('typeRequest', interfaceLanguage)} 
+                 className="flex-1 bg-transparent text-[14px] outline-none placeholder:text-gray-400 font-medium dark:text-white"
+               />
+               <button onClick={() => handleSendMessage()} disabled={!inputText.trim() || assistantState === 'thinking'} className="p-1 text-gray-400 hover:text-gray-800 transition disabled:opacity-30">
+                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+               </button>
+             </div>
+             
+             {voiceState === 'error' && voiceError && (
+               <p className="text-[11px] text-red-500 font-medium">{voiceError}</p>
+             )}
+          </div>
+
+        </>
+      )}
+    </div>
+  );
+};

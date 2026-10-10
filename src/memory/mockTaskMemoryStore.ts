@@ -10,7 +10,7 @@ import {
   TaskRecord,
   TaskStatus,
 } from '../shared/types/memory';
-import { ActionResult } from '../shared/types/actions';
+import { ActionResult, BrowserAction } from '../shared/types/actions';
 import { SupportedLanguage } from '../shared/types/assistant';
 import { generateId, logger } from '../shared/utils';
 
@@ -83,6 +83,23 @@ export class MockTaskMemoryStore implements ITaskMemoryStore {
       task.updatedAt = Date.now();
       logger.info('MockTaskMemoryStore', `Updated task ${taskId} status to ${status}`);
     }
+  }
+
+  public async addStep(taskId: string, action: BrowserAction): Promise<number> {
+    const task = this.tasks.get(taskId);
+    if (!task) return -1;
+    
+    const stepNumber = task.steps.length + 1;
+    task.steps.push({
+      stepNumber,
+      action,
+      result: null,
+      status: 'pending',
+      timestamp: Date.now(),
+    });
+    task.updatedAt = Date.now();
+    logger.info('MockTaskMemoryStore', `Added step ${stepNumber} to task ${taskId}`);
+    return stepNumber;
   }
 
   public async recordStepResult(

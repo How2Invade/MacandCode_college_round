@@ -68,11 +68,17 @@ export class MockBrowserActionExecutor implements IBrowserActionExecutor {
           message: `Scrolled ${action.direction} by ${action.amount}px`,
           data: { direction: action.direction, amount: action.amount },
         };
-      case 'navigate':
+      case 'navigate_back':
         return {
           success: true,
-          message: `Navigated ${action.direction}`,
-          data: { direction: action.direction },
+          message: `Navigated back`,
+          data: { direction: 'back' },
+        };
+      case 'navigate_forward':
+        return {
+          success: true,
+          message: `Navigated forward`,
+          data: { direction: 'forward' },
         };
       case 'switch_tab':
         return {

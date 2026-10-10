@@ -1,0 +1,117 @@
+import { ICursorController } from './mockCursorController';
+import { PointerPosition } from '../shared/types/tracking';
+
+export class RealCursorController implements ICursorController {
+  public readonly isMock = false;
+  private isVisible = false;
+  private currentPos: PointerPosition = { x: 0.5, y: 0.5, confidence: 1, timestamp: Date.now() };
+  private cursorElement: HTMLDivElement | null = null;
+  private styleElement: HTMLStyleElement | null = null;
+
+  constructor() {
+    this.injectStyles();
+    this.createCursor();
+  }
+
+  private injectStyles() {
+    if (document.getElementById('handsfree-cursor-styles')) return;
+    this.styleElement = document.createElement('style');
+    this.styleElement.id = 'handsfree-cursor-styles';
+    this.styleElement.textContent = `
+      #handsfree-cursor {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 32px;
+        height: 32px;
+        background-color: rgba(16, 185, 129, 0.8);
+        border: 2px solid white;
+        border-radius: 50%;
+        pointer-events: none;
+        z-index: 2147483647; /* Maximum z-index */
+        transform: translate(-50%, -50%);
+        transition: transform 0.05s linear;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+        display: none;
+      }
+      #handsfree-cursor.active {
+        display: block;
+      }
+      #handsfree-cursor.clicking {
+        transform: translate(-50%, -50%) scale(0.8);
+        background-color: rgba(239, 68, 68, 0.9);
+      }
+      #handsfree-cursor.right-clicking {
+        background-color: rgba(59, 130, 246, 0.9);
+      }
+    `;
+    document.head.appendChild(this.styleElement);
+  }
+
+  private createCursor() {
+    if (document.getElementById('handsfree-cursor')) return;
+    this.cursorElement = document.createElement('div');
+    this.cursorElement.id = 'handsfree-cursor';
+    document.body.appendChild(this.cursorElement);
+  }
+
+  public moveTo(pos: PointerPosition): void {
+    const isStale = Date.now() - pos.timestamp > 500;
+    const isLowConfidence = pos.confidence < 0.5;
+
+    if (isStale || isLowConfidence) {
+      this.hide();
+      return;
+    }
+
+    this.currentPos = { ...pos };
+    if (!this.isVisible) this.show();
+    
+    if (this.cursorElement) {
+      // Map normalized coordinates (0-1) to viewport dimensions
+      const x = Math.max(0, Math.min(pos.x, 1)) * window.innerWidth;
+      const y = Math.max(0, Math.min(pos.y, 1)) * window.innerHeight;
+      this.cursorElement.style.left = `${x}px`;
+      this.cursorElement.style.top = `${y}px`;
+    }
+  }
+
+  public triggerClickVisual(button: 'left' | 'right' = 'left'): void {
+    if (this.cursorElement) {
+      const className = button === 'right' ? 'right-clicking' : 'clicking';
+      this.cursorElement.classList.add(className);
+      setTimeout(() => {
+        this.cursorElement?.classList.remove(className);
+      }, 150);
+    }
+  }
+
+  public showDwellProgress(progressPercent: number): void {
+    // Optional implementation for dwell progress
+    if (this.cursorElement) {
+      this.cursorElement.style.opacity = `${0.5 + (progressPercent / 200)}`;
+    }
+  }
+
+  public hide(): void {
+    this.isVisible = false;
+    if (this.cursorElement) {
+      this.cursorElement.classList.remove('active');
+    }
+  }
+
+  public show(): void {
+    this.isVisible = true;
+    if (this.cursorElement) {
+      this.cursorElement.classList.add('active');
+    }
+  }
+
+  public getPosition(): PointerPosition {
+    return { ...this.currentPos };
+  }
+
+  public getVisibility(): boolean {
+    return this.isVisible;
+  }
+}

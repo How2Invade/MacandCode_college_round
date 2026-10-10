@@ -1,0 +1,10 @@
+--- tests/unit/sidepanel.test.tsx
++++ tests/unit/sidepanel.test.tsx
+@@ -141,6 +141,8 @@
+       await new Promise(r => setTimeout(r, 50));
+       
+       // Click cancel
++      require('fs').writeFileSync('dom2.html', document.body.innerHTML);
+       const cancelBtn = await screen.findByText(/cancel/i);
+       fireEvent.click(cancelBtn);
+       await new Promise(r => setTimeout(r, 50));

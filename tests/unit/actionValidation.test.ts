@@ -143,7 +143,8 @@ describe('Browser Action Argument Validation (Shared Contract)', () => {
 
     it('should validate and accept scroll_page, navigate, switch_tab, and read_page', () => {
       expect(validateBrowserAction({ type: 'scroll_page', direction: 'down', amount: 400 }).isValid).toBe(true);
-      expect(validateBrowserAction({ type: 'navigate', direction: 'back' }).isValid).toBe(true);
+      expect(validateBrowserAction({ type: 'navigate_back' }).isValid).toBe(true);
+      expect(validateBrowserAction({ type: 'navigate_forward' }).isValid).toBe(true);
       expect(validateBrowserAction({ type: 'switch_tab', direction: 'next' }).isValid).toBe(true);
       expect(validateBrowserAction({ type: 'read_page' }).isValid).toBe(true);
     });

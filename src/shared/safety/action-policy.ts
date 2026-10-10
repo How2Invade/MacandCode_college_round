@@ -44,9 +44,12 @@ export const ScrollPageSchema = z.object({
     .max(10000, { message: 'scroll amount exceeds safety maximum of 10,000px' }),
 });
 
-export const NavigateSchema = z.object({
-  type: z.literal('navigate'),
-  direction: z.enum(['back', 'forward']),
+export const NavigateBackSchema = z.object({
+  type: z.literal('navigate_back'),
+});
+
+export const NavigateForwardSchema = z.object({
+  type: z.literal('navigate_forward'),
 });
 
 export const SwitchTabSchema = z.object({
@@ -63,7 +66,8 @@ export const BrowserActionSchema = z.discriminatedUnion('type', [
   ClickElementSchema,
   TypeTextSchema,
   ScrollPageSchema,
-  NavigateSchema,
+  NavigateBackSchema,
+  NavigateForwardSchema,
   SwitchTabSchema,
   ReadPageSchema,
 ]);
