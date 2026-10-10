@@ -287,7 +287,7 @@ export class HeadTracker implements ITracker {
     // Relative movement from neutral position (mirrored horizontally)
     // Scale the degrees to normalized [0, 1] screen space coordinates
     // We assume roughly +/- 30 degrees for full horizontal motion, +/- 20 degrees for vertical
-    let deltaX = -(currentYaw - this.neutralYaw) / 30 * this.sensitivity;
+    let deltaX = (currentYaw - this.neutralYaw) / 30 * this.sensitivity;
     let deltaY = (currentPitch - this.neutralPitch) / 20 * this.sensitivity;
 
     // Apply Deadzone

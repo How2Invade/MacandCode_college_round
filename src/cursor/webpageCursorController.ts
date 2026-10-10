@@ -26,8 +26,10 @@ export class WebpageCursorController implements ICursorController {
     this.container.style.position = 'fixed';
     this.container.style.top = '0';
     this.container.style.left = '0';
-    this.container.style.width = '100vw';
-    this.container.style.height = '100vh';
+    this.container.style.width = '100%';
+    this.container.style.height = '100%';
+    this.container.style.margin = '0';
+    this.container.style.padding = '0';
     this.container.style.pointerEvents = 'none'; // pass-through clicks
     this.container.style.zIndex = '2147483647'; // max z-index
     this.container.style.display = 'none';
@@ -48,8 +50,14 @@ export class WebpageCursorController implements ICursorController {
     this.cursorElement.style.transition = 'transform 0.05s linear'; // slight smoothing
     
     this.shadowRoot.appendChild(this.cursorElement);
-    document.body.appendChild(this.container);
     
+    // Append to documentElement (<html>) to escape any CSS stacking contexts
+    // or transforms applied to the <body> tag by modern SPAs.
+    if (document.documentElement) {
+      document.documentElement.appendChild(this.container);
+    } else if (document.body) {
+      document.body.appendChild(this.container);
+    }
     // DOM elements are automatically destroyed when the window unloads
   }
 
