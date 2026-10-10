@@ -151,6 +151,8 @@ export class ActionPolicyEngine {
 
     // 3. Inspect type_text
     if (action.type === 'type_text') {
+      riskLevel = 'medium';
+      reasons.push('Entering text can modify or submit user data');
       if (action.targetId) {
         const lower = action.targetId.toLowerCase();
         if (lower.includes('password') || lower.includes('cvv') || lower.includes('card')) {
@@ -160,12 +162,11 @@ export class ActionPolicyEngine {
       }
     }
 
-    // In 'ask' mode, actions with medium risk or above (or any modification) require approval.
-    // In 'auto' mode, only high/critical risk operations require explicit approval.
+    // In 'ask' mode, all modifications require approval. Auto mode only permits low-risk actions.
     const requiresApproval =
       mode === 'ask'
         ? riskLevel !== 'low' || action.type === 'click_element' || action.type === 'type_text'
-        : riskLevel === 'high' || riskLevel === 'critical';
+        : riskLevel !== 'low';
 
     return {
       requiresApproval,

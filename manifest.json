@@ -8,7 +8,13 @@
     "storage",
     "tabs",
     "activeTab",
-    "scripting"
+    "scripting",
+    "audioCapture",
+    "videoCapture"
+  ],
+  "host_permissions": [
+    "http://localhost:4000/*",
+    "http://127.0.0.1:4000/*"
   ],
   "action": {
     "default_popup": "src/popup/index.html",
