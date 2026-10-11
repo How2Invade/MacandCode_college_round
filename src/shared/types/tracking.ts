@@ -36,6 +36,11 @@ export type GestureType =
   | "palm_open"
   | "nod"
   | "shake"
+  | "tab_left"
+  | "tab_right"
+  | "undo"
+  | "redo"
+  | "double_blink"
   | "dwell";
 
 export interface TrackingEvent {

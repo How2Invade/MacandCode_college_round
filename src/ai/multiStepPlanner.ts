@@ -231,6 +231,12 @@ export class MultiStepPlanner {
         return language === 'hi' ? `टैब बदलें (${action.direction})` : language === 'mr' ? `टॅब बदला (${action.direction})` : `Switch tab ${action.direction}`;
       case 'read_page':
         return language === 'hi' ? 'पेज सामग्री पढ़ें' : language === 'mr' ? 'पृष्ठ सामग्री वाचा' : 'Read webpage content';
+      case 'undo':
+        return language === 'hi' ? 'अन्डू करें' : language === 'mr' ? 'अन्डू करा' : 'Undo last action';
+      case 'redo':
+        return language === 'hi' ? 'रीडू करें' : language === 'mr' ? 'रीडू करा' : 'Redo last action';
+      default:
+        return 'Unknown action';
     }
   }
 

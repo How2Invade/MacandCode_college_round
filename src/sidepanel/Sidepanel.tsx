@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   TrackingMode,
   TrackingStatus,
@@ -11,7 +11,7 @@ import {
   AssistantState,
 } from '../shared/types';
 import { MockHandTracker } from '../tracking/hand/mockHandTracker';
-import { MockHeadTracker } from '../tracking/head/mockHeadTracker';
+import { HeadTracker } from '../tracking/head/headTracker';
 import { defaultBackendAiClient } from '../ai/providers/backendAiClient';
 import { defaultChromeStorageTaskMemoryStore } from '../memory/chromeStorageMemoryStore';
 import { defaultChromeBrowserActionExecutor } from '../browser/chromeBrowserActionExecutor';
@@ -19,9 +19,19 @@ import { ResumableTaskManager } from '../memory/resumableTaskManager';
 import { defaultActionPolicy } from '../shared/safety/action-policy';
 import { VoicePipeline, VoiceState, LiveKitVoiceClient, LiveKitVoiceState, LiveKitTranscriptEvent } from '../voice';
 import { PageContext } from '../ai/types';
+import { SharedCursorController } from '../cursor/sharedCursorController';
+import { ICursorController } from '../cursor/mockCursorController';
 
 const handTracker = new MockHandTracker();
-const headTracker = new MockHeadTracker();
+const headTracker = new HeadTracker();
+const dummyCursorUI: ICursorController = {
+  moveTo: () => {},
+  triggerClickVisual: () => {},
+  showDwellProgress: () => {},
+  hide: () => {},
+  show: () => {}
+};
+const cursorController = new SharedCursorController(headTracker, handTracker, dummyCursorUI);
 const voicePipeline = new VoicePipeline();
 const livekitVoiceClient = new LiveKitVoiceClient();
 
@@ -87,6 +97,7 @@ async function getActivePageContext(): Promise<PageContext | undefined> {
 function isCancellationPrompt(text: string): boolean {
   return /^(stop|cancel|abort|please stop|stop please|cancel that|रुको|रोक दो|बस|काम रोक दो|बंद करो)(\s+please)?[.!\s]*$/i.test(text.trim());
 }
+
 
 export const Sidepanel: React.FC = () => {
   // One-time Chrome Extension Microphone Permission Grant Tab Handler
@@ -158,16 +169,91 @@ export const Sidepanel: React.FC = () => {
   // Live action status & pending human approval
   const [currentActionDescription, setCurrentActionDescription] = useState<string>('Ready for motion or voice inputs');
   const [pendingApproval, setPendingApproval] = useState<BrowserAction | null>(null);
+  const [gestureActionsEnabled, setGestureActionsEnabled] = useState<boolean>(false);
+  const [blinkClickEnabled, setBlinkClickEnabled] = useState<boolean>(true);
+  const [tabNavEnabled, setTabNavEnabled] = useState<boolean>(true);
+  const [tiltNavEnabled, setTiltNavEnabled] = useState<boolean>(true);
+  const [previewOnly, setPreviewOnly] = useState<boolean>(false);
+
   // Keep the remainder of an approved multi-step plan while the approval banner is open.
   const pendingPlanRef = React.useRef<{ actions: BrowserAction[]; nextIndex: number; taskId: string } | null>(null);
 
   // Task Memory / History
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
 
-  // Load initial tasks
+  // Camera UI Refs
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Load initial tasks & init trackers
   useEffect(() => {
     defaultChromeStorageTaskMemoryStore.listTasks().then(setTasks);
+    handTracker.initialize().catch(console.error);
+    headTracker.initialize().catch(console.error);
   }, []);
+
+  // Sync Camera Preview and Diagnostics Loop
+  useEffect(() => {
+    if (mode === 'head') {
+      headTracker.setPreviewElements(videoRef.current, canvasRef.current);
+    } else {
+      headTracker.setPreviewElements(null, null);
+    }
+
+    let rafId: number;
+    const updateDiagnostics = () => {
+      if (mode === 'head') {
+        const yawEl = document.getElementById('pose-yaw');
+        const pitchEl = document.getElementById('pose-pitch');
+        const rollEl = document.getElementById('pose-roll');
+        const faceEl = document.getElementById('pose-face');
+
+        if (yawEl) yawEl.innerText = headTracker.pose.yaw.toFixed(1) + '°';
+        if (pitchEl) pitchEl.innerText = headTracker.pose.pitch.toFixed(1) + '°';
+        if (rollEl) rollEl.innerText = headTracker.pose.roll.toFixed(1) + '°';
+        if (faceEl) {
+          faceEl.innerText = headTracker.pose.hasMatrix ? 'Detected' : 'Not Detected';
+          faceEl.className = headTracker.pose.hasMatrix ? 'text-emerald-400 text-[10px]' : 'text-rose-400 text-[10px]';
+        }
+        
+        // Extended Diagnostics
+        const dRelYaw = document.getElementById('diag-rel-yaw');
+        const dRelPitch = document.getElementById('diag-rel-pitch');
+        const dX = document.getElementById('diag-x');
+        const dY = document.getElementById('diag-y');
+        const dCtrl = document.getElementById('diag-ctrl');
+        const dContent = document.getElementById('diag-content');
+        const dGesture = document.getElementById('diag-gesture');
+        const dJaw = document.getElementById('diag-jaw');
+        const dMouthState = document.getElementById('diag-blink-state');
+        const dTabState = document.getElementById('diag-tab-state');
+        
+        if (dRelYaw) dRelYaw.innerText = (headTracker.pose.relYaw || 0).toFixed(2);
+        if (dRelPitch) dRelPitch.innerText = (headTracker.pose.relPitch || 0).toFixed(2);
+        if (dX) dX.innerText = (headTracker.pose.targetX || 0).toFixed(2);
+        if (dY) dY.innerText = (headTracker.pose.targetY || 0).toFixed(2);
+        if (dGesture) dGesture.innerText = headTracker.latestGestureOutput?.gestureLabel || 'None';
+        if (dJaw) dJaw.innerText = (headTracker.latestGestureOutput?.blinkScore || 0).toFixed(2);
+        if (dMouthState) dMouthState.innerText = headTracker.latestGestureOutput?.blinkState || 'IDLE';
+        if (dTabState) dTabState.innerText = headTracker.latestGestureOutput?.tabNavState || 'NEUTRAL';
+        if (dCtrl) dCtrl.innerText = String(cursorController.diagnostics.receivedUpdates);
+        if (dContent) {
+          dContent.innerText = `${cursorController.diagnostics.contentDeliverySuccess} OK / ${cursorController.diagnostics.contentDeliveryFail} FAIL`;
+          
+          const errorsObj = cursorController.diagnostics.errors;
+          const topErrors = Object.entries(errorsObj).map(([msg, count]) => `[${count}x] ${msg}`).join(', ');
+          
+          if (topErrors) {
+            dContent.innerText += `\nErrors: ${topErrors}`;
+          }
+        }
+      }
+      rafId = requestAnimationFrame(updateDiagnostics);
+    };
+    rafId = requestAnimationFrame(updateDiagnostics);
+
+    return () => cancelAnimationFrame(rafId);
+  }, [mode]);
 
   // Sync language with VoicePipeline
   useEffect(() => {
@@ -309,33 +395,96 @@ export const Sidepanel: React.FC = () => {
 
   // Update hardware & tracker status
   const handleStart = async () => {
-    const activeTracker = mode === 'hand' ? handTracker : headTracker;
-    await activeTracker.start(mode);
-    setTrackingStatus(activeTracker.getStatus());
-    setCurrentActionDescription(`Active tracking: ${mode.toUpperCase()} mode running at 30 FPS`);
+    try {
+      await cursorController.start(mode);
+      const status = cursorController.getStatus();
+      setTrackingStatus({
+        mode: status.mode as TrackingMode,
+        state: status.state,
+        confidence: status.confidence,
+        message: status.lastError ? status.lastError.message : `Active tracking: ${mode.toUpperCase()} mode running`
+      });
+      setCurrentActionDescription(`Active tracking: ${mode.toUpperCase()} mode running at 30 FPS`);
+    } catch (e) {
+      console.error(e);
+      const status = cursorController.getStatus();
+      setTrackingStatus({
+        mode: status.mode as TrackingMode,
+        state: status.state,
+        confidence: status.confidence,
+        message: (e as Error).message
+      });
+      setCurrentActionDescription(`Failed to start: ${(e as Error).message}`);
+    }
   };
 
   const handlePause = async () => {
-    const activeTracker = mode === 'hand' ? handTracker : headTracker;
-    await activeTracker.pause();
-    setTrackingStatus(activeTracker.getStatus());
+    await cursorController.pause();
+    const status = cursorController.getStatus();
+    setTrackingStatus({
+      mode: status.mode as TrackingMode,
+      state: status.state,
+      confidence: status.confidence,
+      message: 'Paused'
+    });
     setCurrentActionDescription('Tracking paused by user');
   };
 
   const handleStop = async () => {
-    const activeTracker = mode === 'hand' ? handTracker : headTracker;
-    await activeTracker.stop();
-    setTrackingStatus(activeTracker.getStatus());
+    await cursorController.stop();
+    const status = cursorController.getStatus();
+    setTrackingStatus({
+      mode: mode,
+      state: status.state,
+      confidence: status.confidence,
+      message: 'Stopped'
+    });
     setCurrentActionDescription('Tracking stopped');
   };
 
   const handleModeChange = (newMode: TrackingMode) => {
     setMode(newMode);
     if (trackingStatus.state === 'active') {
-      const activeTracker = newMode === 'hand' ? handTracker : headTracker;
-      activeTracker.start(newMode);
-      setTrackingStatus(activeTracker.getStatus());
+      cursorController.start(newMode).then(() => {
+        const status = cursorController.getStatus();
+        setTrackingStatus({
+          mode: status.mode as TrackingMode,
+          state: status.state,
+          confidence: status.confidence,
+          message: status.lastError ? status.lastError.message : `Active tracking: ${newMode.toUpperCase()} mode running`
+        });
+      });
     }
+  };
+
+  const handleToggleGestureActions = () => {
+    const newState = !gestureActionsEnabled;
+    setGestureActionsEnabled(newState);
+    cursorController.gestureActionsEnabled = newState;
+  };
+
+  const handleToggleBlinkClick = () => {
+    const newState = !blinkClickEnabled;
+    setBlinkClickEnabled(newState);
+    headTracker.configureGestures({ blinkClickEnabled: newState });
+  };
+
+  const handleToggleTabNav = () => {
+    const newState = !tabNavEnabled;
+    setTabNavEnabled(newState);
+    headTracker.configureGestures({ tabNavEnabled: newState });
+  };
+
+  const handleToggleTiltNav = () => {
+    const newState = !tiltNavEnabled;
+    setTiltNavEnabled(newState);
+    headTracker.configureGestures({ tiltNavEnabled: newState });
+  };
+
+  const handleTogglePreviewOnly = () => {
+    const newState = !previewOnly;
+    setPreviewOnly(newState);
+    headTracker.configureGestures({ previewOnly: newState });
   };
 
   const cancelCurrentWork = async () => {
@@ -774,6 +923,76 @@ export const Sidepanel: React.FC = () => {
         </div>
       )}
 
+      {/* Camera Preview (Head Mode Only) */}
+      {mode === 'head' && (
+        <div className="bg-slate-800/90 rounded-xl p-2 border border-slate-700 space-y-2">
+          <div className="flex items-center justify-between text-xs font-semibold text-slate-300 px-1">
+            <span>Camera Preview</span>
+            <span id="pose-face" className="text-slate-400 text-[10px]">Off</span>
+          </div>
+          <div className="relative w-full bg-black rounded-lg overflow-hidden border border-slate-700/60 aspect-video flex items-center justify-center">
+             {trackingStatus.state !== 'active' && trackingStatus.state !== 'calibrating' && (
+               <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-500 z-10 p-4 text-center">
+                 <span className="text-2xl mb-2">📸</span>
+                 <p className="text-[10px]">{trackingStatus.message || 'Click Start to activate camera'}</p>
+               </div>
+             )}
+             <video
+               ref={videoRef}
+               className="w-full h-full object-cover transform scale-x-[-1]"
+               playsInline
+               muted
+             />
+             <canvas
+               ref={canvasRef}
+               className="absolute inset-0 w-full h-full object-cover transform scale-x-[-1] pointer-events-none"
+             />
+          </div>
+          {/* Matrix Pose Diagnostics */}
+          <div className="grid grid-cols-3 gap-1 px-1">
+             <div className="bg-slate-900/50 p-1.5 rounded text-center border border-slate-700/50">
+                <div className="text-[9px] uppercase text-slate-500 mb-0.5">Yaw</div>
+                <div id="pose-yaw" className="text-[11px] font-mono text-slate-300">0.0°</div>
+             </div>
+             <div className="bg-slate-900/50 p-1.5 rounded text-center border border-slate-700/50">
+                <div className="text-[9px] uppercase text-slate-500 mb-0.5">Pitch</div>
+                <div id="pose-pitch" className="text-[11px] font-mono text-slate-300">0.0°</div>
+             </div>
+             <div className="bg-slate-900/50 p-1.5 rounded text-center border border-slate-700/50">
+                <div className="text-[9px] uppercase text-slate-500 mb-0.5">Roll</div>
+                <div id="pose-roll" className="text-[11px] font-mono text-slate-300">0.0°</div>
+             </div>
+          </div>
+          
+          {/* Cursor Diagnostics */}
+          <div className="bg-slate-900/80 rounded p-2 border border-slate-700/60 mt-1 text-[10px] font-mono text-slate-400 space-y-1">
+             <div className="flex justify-between font-bold text-indigo-300 border-b border-slate-800 pb-1 mb-1">
+                <span>Gesture Preview:</span>
+                <span id="diag-gesture" className="text-white">None</span>
+             </div>
+             <div className="flex justify-between">
+                <span>Blink State: <span id="diag-blink-state" className="text-white">IDLE</span></span>
+                <span>Blink: <span id="diag-jaw" className="text-white">0.00</span></span>
+             </div>
+             <div className="flex justify-between border-b border-slate-800 pb-1 mb-1">
+                <span>Tab State: <span id="diag-tab-state" className="text-white">NEUTRAL</span></span>
+             </div>
+             <div className="flex justify-between">
+                <span>Rel Yaw: <span id="diag-rel-yaw" className="text-white">0.00</span>°</span>
+                <span>Rel Pitch: <span id="diag-rel-pitch" className="text-white">0.00</span>°</span>
+             </div>
+             <div className="flex justify-between">
+                <span>Norm X: <span id="diag-x" className="text-white">0.00</span></span>
+                <span>Norm Y: <span id="diag-y" className="text-white">0.00</span></span>
+             </div>
+             <div className="flex justify-between text-[9px] text-slate-500 pt-1 border-t border-slate-800">
+                <span>Ctrl Msgs: <span id="diag-ctrl" className="text-slate-300">0</span></span>
+                <span>Content Rx: <span id="diag-content" className="text-slate-300">0 OK / 0 FAIL</span></span>
+             </div>
+          </div>
+        </div>
+      )}
+
       {/* Hardware / Tracker Status Indicators */}
       <div className="grid grid-cols-2 gap-2 text-xs">
         <div className="flex items-center space-x-2 bg-slate-800/80 p-2 rounded-lg border border-slate-700/60">
@@ -807,8 +1026,8 @@ export const Sidepanel: React.FC = () => {
 
       {/* Mode Selectors */}
       <div className="space-y-1.5">
-        <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-          Tracking Mode
+        <label className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex justify-between items-center">
+          <span>Tracking Mode</span>
         </label>
         <div className="grid grid-cols-2 gap-2 bg-slate-800/90 p-1 rounded-xl border border-slate-700">
           <button
@@ -831,6 +1050,35 @@ export const Sidepanel: React.FC = () => {
           >
             👤 Head Mode
           </button>
+        </div>
+      </div>
+
+      {/* Gesture Controls */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+          Gesture Actions
+        </label>
+        <div className="grid grid-cols-2 gap-2 text-[10px] text-slate-300">
+          <label className="flex items-center space-x-1 cursor-pointer bg-slate-800/80 p-1.5 rounded border border-slate-700/60">
+            <input type="checkbox" className="accent-indigo-500" checked={gestureActionsEnabled} onChange={handleToggleGestureActions} />
+            <span>Master Actions</span>
+          </label>
+          <label className="flex items-center space-x-1 cursor-pointer bg-slate-800/80 p-1.5 rounded border border-slate-700/60">
+            <input type="checkbox" className="accent-indigo-500" checked={previewOnly} onChange={handleTogglePreviewOnly} />
+            <span>Preview Mode (No click/tab)</span>
+          </label>
+          <label className="flex items-center space-x-1 cursor-pointer bg-slate-800/80 p-1.5 rounded border border-slate-700/60">
+            <input type="checkbox" className="accent-indigo-500" checked={blinkClickEnabled} onChange={handleToggleBlinkClick} />
+            <span>Double Blink (Click)</span>
+          </label>
+          <label className="flex items-center space-x-1 cursor-pointer bg-slate-800/80 p-1.5 rounded border border-slate-700/60">
+            <input type="checkbox" className="accent-indigo-500" checked={tabNavEnabled} onChange={handleToggleTabNav} />
+            <span>Head Turn (Tabs)</span>
+          </label>
+          <label className="flex items-center space-x-1 cursor-pointer bg-slate-800/80 p-1.5 rounded border border-slate-700/60">
+            <input type="checkbox" className="accent-indigo-500" checked={tiltNavEnabled} onChange={handleToggleTiltNav} />
+            <span>Head Tilt (Undo/Redo)</span>
+          </label>
         </div>
       </div>
 

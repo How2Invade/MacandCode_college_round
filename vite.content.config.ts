@@ -3,6 +3,11 @@ import { resolve } from 'path';
 
 /** Build the MV3 content script as one classic, self-contained script. */
 export default defineConfig({
+  resolve: {
+    alias: {
+      '@': resolve(__dirname, './src'),
+    },
+  },
   build: {
     outDir: 'dist',
     emptyOutDir: false,
