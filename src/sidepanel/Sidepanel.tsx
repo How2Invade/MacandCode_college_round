@@ -91,6 +91,8 @@ export const Sidepanel: React.FC = () => {
   const calibrationInFlightRef = useRef(false);
   const calibrationPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const [showGestureGuide, setShowGestureGuide] = useState(false);
+
   // Settings
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask');
   const [interfaceLanguage, setInterfaceLanguage] = useState<SupportedLanguage>('en');
@@ -937,16 +939,30 @@ export const Sidepanel: React.FC = () => {
               </div>
             </div>
             
-            <div className="flex justify-center pt-2 pb-1 border-t border-hf-border dark:border-white/10">
+            <div className="flex flex-col pt-2 pb-1 border-t border-hf-border dark:border-white/10 space-y-1.5">
+              <div className="flex items-center justify-between px-1">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-hf-text-secondary/80 dark:text-hf-dark-text-secondary/80">
+                  {mode === 'hand' ? 'Quick Gestures' : 'Head Controls'}
+                </span>
+                <button
+                  onClick={() => setShowGestureGuide(true)}
+                  className="flex items-center space-x-1 text-[11px] font-bold text-hf-teal hover:text-hf-teal/80 transition px-1.5 py-0.5 rounded-md hover:bg-hf-teal/10"
+                  title="View complete gesture dictionary"
+                >
+                  <span>All Gestures</span>
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 5l7 7-7 7"/></svg>
+                </button>
+              </div>
+
               {mode === 'hand' ? (
-                <div className="flex justify-around w-full max-w-sm text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary">
+                <div className="flex flex-wrap justify-between items-center w-full px-1 text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary gap-x-1.5 gap-y-1">
                   <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Point:</span><span>Move</span></div>
-                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-text-primary">2 fingers:</span><span>Tab/Scroll</span></div>
-                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-text-primary">3 fingers:</span><span>Scroll</span></div>
-                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-text-primary">Air click:</span><span>Feedback</span></div>
+                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">2 fingers:</span><span>Tab/Scroll</span></div>
+                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">3 fingers:</span><span>Scroll</span></div>
+                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Air click:</span><span>Feedback</span></div>
                 </div>
               ) : (
-                <div className="flex justify-around w-full max-w-sm text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary">
+                <div className="flex flex-wrap justify-between items-center w-full px-1 text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary gap-x-1.5 gap-y-1">
                   <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Look:</span><span>Move</span></div>
                   <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Nod:</span><span>Click</span></div>
                   <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Shake:</span><span>Cancel</span></div>
@@ -1266,9 +1282,169 @@ export const Sidepanel: React.FC = () => {
              {voiceState === 'error' && voiceError && (
                <p className="text-[11px] text-red-500 font-medium">{voiceError}</p>
              )}
-          </div>
+           </div>
 
         </>
+      )}
+
+      {/* Complete Gesture & Features Dictionary Drawer/Modal */}
+      {showGestureGuide && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div 
+            className="w-full max-w-lg max-h-[85vh] bg-hf-ivory dark:bg-[#1E2025] rounded-t-3xl sm:rounded-3xl border border-white/60 dark:border-white/10 shadow-2xl flex flex-col overflow-hidden animate-in slide-in-from-bottom duration-300"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Drawer Header */}
+            <div className="flex items-center justify-between p-4 border-b border-hf-border dark:border-white/10 shrink-0 bg-gradient-to-r from-transparent via-white/40 dark:via-white/5 to-transparent">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-8 h-8 rounded-xl bg-hf-teal/10 dark:bg-hf-teal/20 text-hf-teal flex items-center justify-center">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+                </div>
+                <div>
+                  <h3 className="text-[15px] font-bold text-hf-text-primary dark:text-hf-dark-text-primary dark:text-white leading-tight">Controls &amp; Gesture Dictionary</h3>
+                  <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary">Complete reference of supported handsfree interactions</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setShowGestureGuide(false)}
+                className="w-8 h-8 rounded-full bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-gray-500 dark:text-gray-300 flex items-center justify-center transition"
+                title="Close"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/></svg>
+              </button>
+            </div>
+
+            {/* Dictionary Content Sections */}
+            <div className="p-4 overflow-y-auto space-y-4 text-[12px]">
+              {/* Hand Gestures Section */}
+              <div className="space-y-2">
+                <div className="flex items-center space-x-2 text-[12px] font-bold text-hf-teal uppercase tracking-wider">
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M21.2 9.5c-.3-.3-.7-.5-1.1-.6-.4-.1-.8-.1-1.2 0-.2 0-.5.1-.7.2l-.7-3.2c-.1-.5-.4-.9-.9-1.2-.5-.2-1-.3-1.5-.1-.5.1-.9.5-1.2 1-.2.4-.2.8-.2 1.3V9c-.1-.2-.3-.5-.5-.6-.3-.2-.6-.3-1-.3-.4 0-.8.1-1.1.4-.4.3-.6.7-.6 1.1v3.2L9.3 12c-.3-.2-.7-.3-1-.3-.4 0-.8.1-1.1.4-.5.4-.7 1-.5 1.5l1.6 5.8c.4 1.5 1.8 2.5 3.3 2.5h2.1c2 0 3.8-1.2 4.6-3L21 12.3c.4-1 .3-2-.2-2.8z"/></svg>
+                  <span>Hand Gestures</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10 flex flex-col justify-between">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-hf-text-primary dark:text-white">Point (Index finger)</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 font-semibold">Pointer</span>
+                    </div>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-1">Moves mouse cursor across webpage</p>
+                  </div>
+
+                  <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10 flex flex-col justify-between">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-hf-text-primary dark:text-white">Air Click (Index + Pinky)</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300 font-semibold">Click</span>
+                    </div>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-1">Performs click action at cursor position</p>
+                  </div>
+
+                  <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10 flex flex-col justify-between">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-hf-text-primary dark:text-white">2 Fingers Swipe</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300 font-semibold">Tabs / Scroll</span>
+                    </div>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-1">Swipe horizontal to switch tabs, vertical to scroll</p>
+                  </div>
+
+                  <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10 flex flex-col justify-between">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-hf-text-primary dark:text-white">3 Fingers Swipe</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300 font-semibold">Fast Scroll</span>
+                    </div>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-1">Dedicated smooth scroll up / down</p>
+                  </div>
+
+                  <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10 flex flex-col justify-between">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-hf-text-primary dark:text-white">Thumbs Up / Down</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 font-semibold">Zoom</span>
+                    </div>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-1">Thumbs Up: Zoom In · Thumbs Down: Zoom Out</p>
+                  </div>
+
+                  <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10 flex flex-col justify-between">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-hf-text-primary dark:text-white">4 Fingers Horizontal Swipe</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 font-semibold">History</span>
+                    </div>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-1">Swipe left to Undo, swipe right to Redo</p>
+                  </div>
+
+                  <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10 flex flex-col justify-between">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-hf-text-primary dark:text-white">Shaka 🤙 (Thumb + Pinky)</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300 font-semibold">Voice Toggle</span>
+                    </div>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-1">Instantly starts or stops voice listening</p>
+                  </div>
+
+                  <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10 flex flex-col justify-between">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-hf-text-primary dark:text-white">Fist ✊ / Open Palm ✋</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300 font-semibold">Quick Actions</span>
+                    </div>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-1">Fist: Undo · Palm Open: Redo / Reset</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Head Tracking Section */}
+              <div className="space-y-2 pt-2 border-t border-hf-border dark:border-white/10">
+                <div className="flex items-center space-x-2 text-[12px] font-bold text-hf-teal uppercase tracking-wider">
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C8.1 2 5 5.1 5 9c0 2.4 1.2 4.5 3 5.7V17c0 .6.4 1 1 1h6c.6 0 1-.4 1-1v-2.3c1.8-1.2 3-3.3 3-5.7 0-3.9-3.1-7-7-7zm0 2c2.8 0 5 2.2 5 5 0 2-.1 4-2 5v2H9v-2c-1.9-1-2-3-2-5 0-2.8 2.2-5 5-5z"/></svg>
+                  <span>Head Tracking Controls</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10">
+                    <span className="font-bold text-hf-text-primary dark:text-white">Look Around:</span>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-0.5">Smooth head tilt moves cursor anywhere on screen</p>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10">
+                    <span className="font-bold text-hf-text-primary dark:text-white">Nod:</span>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-0.5">Quick nod down triggers primary click</p>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10">
+                    <span className="font-bold text-hf-text-primary dark:text-white">Shake:</span>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-0.5">Quick head shake cancels task or dismisses modal</p>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10">
+                    <span className="font-bold text-hf-text-primary dark:text-white">Dwell:</span>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-0.5">Hovering pointer over any button activates click</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Voice Commands Section */}
+              <div className="space-y-2 pt-2 border-t border-hf-border dark:border-white/10">
+                <div className="flex items-center space-x-2 text-[12px] font-bold text-hf-teal uppercase tracking-wider">
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+                  <span>Voice Shortcuts &amp; AI Control</span>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10 space-y-1.5 text-[11px]">
+                  <div className="flex items-center justify-between"><span className="font-semibold text-hf-text-primary dark:text-white">&quot;Scroll down / Scroll up&quot;</span><span className="text-hf-text-secondary dark:text-hf-dark-text-secondary">Scrolls the page</span></div>
+                  <div className="flex items-center justify-between"><span className="font-semibold text-hf-text-primary dark:text-white">&quot;Click [button name or element]&quot;</span><span className="text-hf-text-secondary dark:text-hf-dark-text-secondary">AI clicks targeted item</span></div>
+                  <div className="flex items-center justify-between"><span className="font-semibold text-hf-text-primary dark:text-white">&quot;Read this page&quot;</span><span className="text-hf-text-secondary dark:text-hf-dark-text-secondary">Reads web page text aloud</span></div>
+                  <div className="flex items-center justify-between"><span className="font-semibold text-hf-text-primary dark:text-white">&quot;Next tab / Previous tab&quot;</span><span className="text-hf-text-secondary dark:text-hf-dark-text-secondary">Switches browser tab</span></div>
+                  <div className="flex items-center justify-between"><span className="font-semibold text-hf-text-primary dark:text-white">&quot;Zoom in / Zoom out&quot;</span><span className="text-hf-text-secondary dark:text-hf-dark-text-secondary">Scales page magnification</span></div>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer close button */}
+            <div className="p-3 border-t border-hf-border dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.02] flex justify-end">
+              <button
+                onClick={() => setShowGestureGuide(false)}
+                className="px-4 py-2 bg-hf-teal text-white rounded-xl text-[12px] font-bold hover:bg-hf-teal/90 transition shadow-sm"
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
