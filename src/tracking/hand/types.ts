@@ -104,6 +104,7 @@ export type GestureTransitionType =
   | 'shaka'
   | 'palm_open'
   | 'fist'
+  | 'screenshot'
   | 'none';
 
 export interface GestureEvent {

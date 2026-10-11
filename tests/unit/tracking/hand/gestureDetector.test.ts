@@ -69,6 +69,12 @@ function createHand(pose: string, flipY: boolean = false): NormalizedLandmark[] 
     setFinger([9,10,11,12], false, 'y', -1, 0);
     setFinger([13,14,15,16], false, 'y', -1, 0.1);
     setFinger([17,18,19,20], false, 'y', -1, 0.2);
+  } else if (pose === 'two_finger') {
+    setFinger([1,2,3,4], false, 'y', -1, -0.2);
+    setFinger([5,6,7,8], true, 'y', -1);
+    setFinger([9,10,11,12], true, 'y', -1);
+    setFinger([13,14,15,16], false, 'y', -1, 0.1);
+    setFinger([17,18,19,20], false, 'y', -1, 0.2);
   } else if (pose === 'pinch') {
     // For pinch, index tip and thumb tip are very close.
     // Thumb
@@ -78,6 +84,13 @@ function createHand(pose: string, flipY: boolean = false): NormalizedLandmark[] 
     let pIndex = { ...base }; pIndex.y -= 0.101;
     landmarks[5] = pIndex; landmarks[6] = pIndex; landmarks[7] = pIndex; landmarks[8] = pIndex;
     
+    setFinger([9,10,11,12], false, 'y', -1, 0);
+    setFinger([13,14,15,16], false, 'y', -1, 0.1);
+    setFinger([17,18,19,20], false, 'y', -1, 0.2);
+  } else if (pose === 'camera_frame') {
+    // Thumb extended outwards, index extended up, other 3 fingers curled
+    setFinger([1,2,3,4], true, 'x', 1);
+    setFinger([5,6,7,8], true, 'y', -1);
     setFinger([9,10,11,12], false, 'y', -1, 0);
     setFinger([13,14,15,16], false, 'y', -1, 0.1);
     setFinger([17,18,19,20], false, 'y', -1, 0.2);
@@ -154,9 +167,30 @@ describe('GestureDetector', () => {
     const flippedHand = createHand('thumbs_down', true); 
     detector.process(flippedHand, 100);
     detector.process(flippedHand, 116);
-    // flipped Y turns thumbs down into thumbs up!
-    // My browserCommand logic uses `thumb.y < wrist.y - palmWidth * 0.7` which is orientation dependent!
-    // We should test that it fires something.
     expect(events.length).toBeGreaterThan(0);
+  });
+
+  it('detects two-finger swipe up and down for scrolling without conflicting with pointing', () => {
+    const initialHand = createHand('two_finger');
+    // Frame 1: establishes two-finger swipe origin
+    detector.process(initialHand, 100);
+
+    // Frame 2: moves hand upward by 0.09 (y decreases)
+    const scrolledUpHand = initialHand.map(pt => ({ ...pt, y: pt.y - 0.09 }));
+    detector.process(scrolledUpHand, 116);
+    detector.process(scrolledUpHand, 132);
+
+    expect(events.find(e => e.type === 'scroll_up')).toBeDefined();
+  });
+
+  it('detects two-hand camera frame easter egg gesture for screenshot', () => {
+    const leftHand = createHand('camera_frame').map(pt => ({ ...pt, x: pt.x - 0.2 }));
+    const rightHand = createHand('camera_frame').map(pt => ({ ...pt, x: pt.x + 0.2 }));
+
+    detector.process(rightHand, 100, [leftHand, rightHand]);
+    detector.process(rightHand, 116, [leftHand, rightHand]);
+
+    expect(events.find(e => e.type === 'screenshot')).toBeDefined();
+    expect(events.find(e => e.gesture === 'screenshot')).toBeDefined();
   });
 });

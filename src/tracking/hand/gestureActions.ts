@@ -32,7 +32,7 @@ export function actionForHandGesture(gesture: GestureType): BrowserAction | null
     case 'pinch':
       return { type: 'click_element', targetId: 'cursor' };
     case 'shaka':
-      // Shaka might be interpreted as returning to home or toggling listening, but let's map it safely to null if unknown, or maybe read_page? Let's just return null to not invent.
+    case 'screenshot':
       return null;
     default:
       return null;

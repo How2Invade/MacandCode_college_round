@@ -14,7 +14,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
-    "backend:dev": "node --env-file-if-exists=backend/.env --env-file-if-exists=backend/src/.env --env-file-if-exists=.env --import tsx/esm backend/src/index.ts"
+    "backend:dev": "node --env-file-if-exists=backend/.env --env-file-if-exists=backend/src/.env --env-file-if-exists=.env --import tsx/esm backend/src/index.ts",
+    "extension:open": "\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --load-extension=\"$PWD/dist\" --disable-extensions-except=\"$PWD/dist\" --user-data-dir=\"$PWD/.chrome-dev-profile\" --no-first-run --no-default-browser-check \"https://www.google.com\""
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^0.10.14",

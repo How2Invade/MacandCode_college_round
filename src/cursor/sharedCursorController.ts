@@ -219,7 +219,8 @@ export class SharedCursorController {
             if (tabs[0]?.id) {
               chrome.tabs.sendMessage(tabs[0].id, { 
                 type: 'EXECUTE_BROWSER_ACTION', 
-                payload: { action: { type: 'click', coordinates: { x: event.position.x, y: event.position.y } } }
+                payload: { action: { type: 'click_element', targetId: 'cursor', coordinates: { x: event.position.x, y: event.position.y } } },
+                action: { type: 'click_element', targetId: 'cursor', coordinates: { x: event.position.x, y: event.position.y } }
               }).catch(() => {});
             }
           });
@@ -232,11 +233,11 @@ export class SharedCursorController {
               chrome.tabs.query({ active: true, currentWindow: true }, (activeTabs) => {
                 const activeIndex = activeTabs[0]?.index ?? 0;
                 let nextIndex = activeIndex;
-                if (event.gesture === 'tab_right') {
-                   // User says it's swapped, so tab_right now goes to previous tab
+                if (event.gesture === 'tab_left') {
+                   // Left turn/nod: switch to left (previous) tab
                    nextIndex = (activeIndex - 1 + tabs.length) % tabs.length;
-                } else {
-                   // and tab_left goes to next tab
+                } else if (event.gesture === 'tab_right') {
+                   // Right turn/nod: switch to right (next) tab
                    nextIndex = (activeIndex + 1) % tabs.length;
                 }
                 const nextTab = tabs.find(t => t.index === nextIndex);

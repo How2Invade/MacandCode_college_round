@@ -50,22 +50,54 @@ export class MockAiClient implements IAssistantClient {
   ): Promise<BrowserAction[]> {
     logger.info('MockAiClient', `Generating mock action plan for goal: "${goal}" in [${language}]`);
 
-    if (goal.toLowerCase().includes('youtube')) {
+    const g = goal.toLowerCase();
+    if (g.includes('youtube')) {
       return [{ type: 'open_url', url: 'https://www.youtube.com' }];
-    } else if (goal.toLowerCase().includes('google')) {
+    }
+    if (g.includes('google')) {
       return [{ type: 'open_url', url: 'https://www.google.com' }];
     }
+    if (g.includes('github')) {
+      return [{ type: 'open_url', url: 'https://github.com' }];
+    }
+    if (g.includes('wikipedia')) {
+      return [{ type: 'open_url', url: 'https://www.wikipedia.org' }];
+    }
+    if (g.includes('up') || g.includes('ऊपर') || g.includes('वर')) {
+      return [{ type: 'scroll_page', direction: 'up', amount: 400 }];
+    }
+    if (g.includes('down') || g.includes('नीचे') || g.includes('खाली')) {
+      return [{ type: 'scroll_page', direction: 'down', amount: 400 }];
+    }
+    if (g.includes('click') || g.includes('क्लिक') || g.includes('select')) {
+      return [{ type: 'click_element', targetId: 'cursor' }];
+    }
+    if (g.includes('back') || g.includes('पीछे') || g.includes('मागे')) {
+      return [{ type: 'navigate_back' }];
+    }
+    if (g.includes('forward') || g.includes('आगे') || g.includes('पुढे')) {
+      return [{ type: 'navigate_forward' }];
+    }
+    if (g.includes('zoom in') || g.includes('बड़ा करो')) {
+      return [{ type: 'zoom_page', direction: 'in' }];
+    }
+    if (g.includes('zoom out') || g.includes('छोटा करो')) {
+      return [{ type: 'zoom_page', direction: 'out' }];
+    }
+    if (g.includes('next tab') || g.includes('अगला टैब')) {
+      return [{ type: 'switch_tab', direction: 'next' }];
+    }
+    if (g.includes('prev') || g.includes('पिछला टैब')) {
+      return [{ type: 'switch_tab', direction: 'previous' }];
+    }
 
-    // Return agreed BrowserAction variants
-    const plan: BrowserAction[] = [
+    return [
       {
         type: 'scroll_page',
         direction: 'down',
         amount: 300,
       }
     ];
-
-    return plan;
   }
 }
 

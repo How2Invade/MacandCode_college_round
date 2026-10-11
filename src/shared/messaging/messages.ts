@@ -37,7 +37,10 @@ export type MessageType =
   // Tasks & Settings
   | 'GET_INITIAL_STATE'
   | 'TASK_LIST_UPDATED'
-  | 'SETTINGS_UPDATED';
+  | 'SETTINGS_UPDATED'
+
+  // Easter eggs & browser captures
+  | 'CAPTURE_SCREENSHOT';
 
 export interface BaseMessage<T extends MessageType, P = unknown> {
   type: T;
@@ -116,7 +119,8 @@ export type HandsfreeMessage =
   | BaseMessage<'ACTION_EXECUTION_COMPLETED', ActionCompletedPayload>
   | BaseMessage<'GET_INITIAL_STATE', Record<string, never>>
   | BaseMessage<'TASK_LIST_UPDATED', TaskRecord[]>
-  | BaseMessage<'SETTINGS_UPDATED', Partial<UserSettings>>;
+  | BaseMessage<'SETTINGS_UPDATED', Partial<UserSettings>>
+  | BaseMessage<'CAPTURE_SCREENSHOT', { tabId?: number }>;
 
 export function createMessage<T extends MessageType, P>(
   type: T,

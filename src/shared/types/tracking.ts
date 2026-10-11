@@ -53,6 +53,7 @@ export type GestureType =
   | "undo"
   | "redo"
   | "double_blink"
+  | "screenshot"
   | "dwell";
 
 export interface TrackingEvent {

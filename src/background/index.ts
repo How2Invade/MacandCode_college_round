@@ -177,6 +177,27 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           break;
         }
 
+        case 'CAPTURE_SCREENSHOT': {
+          logger.info('Background', 'Capturing visible tab screenshot via gesture');
+          resolveTargetTab((message.payload as any)?.tabId, sender)
+            .then((res) => {
+              const windowId = res.tab?.windowId ?? chrome.windows?.WINDOW_ID_CURRENT;
+              if (chrome.tabs?.captureVisibleTab) {
+                chrome.tabs.captureVisibleTab(windowId, { format: 'png' }, (dataUrl) => {
+                  if (chrome.runtime.lastError || !dataUrl) {
+                    sendResponse({ success: false, message: chrome.runtime.lastError?.message || 'Screenshot failed' });
+                  } else {
+                    sendResponse({ success: true, dataUrl });
+                  }
+                });
+              } else {
+                sendResponse({ success: false, message: 'captureVisibleTab not supported' });
+              }
+            })
+            .catch((err: any) => sendResponse({ success: false, message: err?.message || 'Capture failed' }));
+          return true;
+        }
+
         case 'EXECUTE_BROWSER_ACTION': {
           logger.info('Background', `Executing browser action ${message.payload?.action?.type}`);
           const action = message.payload?.action;

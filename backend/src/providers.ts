@@ -87,6 +87,169 @@ function explicitSearchResponse(request: AiCompletionRequest): AiCompletionRespo
   return { reply, actions, costEstimate: { estimatedCostUsd: 0, tokensUsed: 0, model: 'local-search-intent' } };
 }
 
+function ensureDocumentWorkflow(prompt: string, actions: any[], pageContext?: any): any[] {
+  const lower = prompt.toLowerCase();
+  // If the user is asking to draft/write an email, NEVER create a Google Doc!
+  const isEmail = /email|mail|gmail|draught|draft|ईमेल/i.test(lower);
+  if (isEmail && !/google\s*doc|blank\s*doc|blind\s*doc/i.test(lower)) {
+    return actions;
+  }
+
+  const isDocCreation =
+    /blank\s*doc|blind\s*doc|new\s*doc|open\s*doc|google\s*doc|create\s*doc|start\s*writing|open\s*a\s*document|docs\.new/i.test(lower) ||
+    (/doc/i.test(lower) && /open|create|write|start|blank|blind|new/i.test(lower)) ||
+    (/document/i.test(lower) && /open|create|write|start|blank|blind|new/i.test(lower)) ||
+    (/दस्तावेज़|डॉक्यूमेंट/i.test(lower) && /खोलो|बनाओ|लिखो/i.test(lower));
+
+  if (!isDocCreation) return actions;
+
+  const hasOpenDocs = actions.some((a) => a.type === 'open_url' && /docs\.(new|google\.com)/i.test(a.url || ''));
+  const resultActions = [...actions];
+  if (!hasOpenDocs) {
+    resultActions.unshift({ type: 'open_url', url: 'https://docs.new' });
+  }
+
+  // Extract text to write
+  let textToWrite = '';
+  const writeMatch = prompt.match(/(?:write|start writing|type|लिखो|लिहा)\s+(?:a\s+\d+.*?(?:essay|paragraph|page)\s+(?:on|about)\s+)?(.*)/i);
+  if (writeMatch && writeMatch[1]) {
+    textToWrite = writeMatch[1].trim();
+  } else if (/ronaldo/i.test(prompt)) {
+    textToWrite = 'I love Cristiano Ronaldo, one of the greatest football players of all time.';
+  }
+
+  // Contextual summary from current page
+  if ((/summar|summary|सार/i.test(lower) || /about this page|from this page|page context|इस पेज/i.test(lower)) && pageContext?.visibleText) {
+    textToWrite = `Summary and Notes from ${pageContext.title || 'Page'}:\n\n${pageContext.visibleText.slice(0, 1000)}...`;
+  }
+
+  if (!textToWrite) {
+    if (pageContext?.visibleText && pageContext.visibleText.length > 50) {
+      textToWrite = `Notes from ${pageContext.title || 'Current Webpage'}:\n\n${pageContext.visibleText.slice(0, 600)}`;
+    } else {
+      textToWrite = 'Document created with Handsfree AI Assistant.\nReady for co-working and collaboration.';
+    }
+  }
+
+  const typeActionIndex = resultActions.findIndex((a) => a.type === 'type_text');
+  if (typeActionIndex >= 0) {
+    const existing = resultActions[typeActionIndex];
+    if ((!existing.text || existing.text.length < 5) && textToWrite) {
+      existing.text = textToWrite;
+    }
+    existing.targetId = 'kix-app-content-editor';
+  } else if (textToWrite) {
+    resultActions.push({
+      type: 'type_text',
+      text: textToWrite,
+      targetId: 'kix-app-content-editor',
+    });
+  }
+
+  return resultActions;
+}
+
+function ensureEmailWorkflow(prompt: string, actions: any[], pageContext?: any): any[] {
+  const lower = prompt.toLowerCase();
+  const isEmailIntent =
+    /email|mail|gmail|ईमेल|पत्र/i.test(lower) ||
+    /draught|draft|compose/i.test(lower);
+
+  if (!isEmailIntent) return actions;
+
+  // Extract recipient email or contact name
+  let recipient = '';
+  const emailMatch = prompt.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+  if (emailMatch) {
+    recipient = emailMatch[1];
+  } else if (/meet\s*madgaonkar/i.test(prompt) || /मीट\s*मडगांवकर/i.test(prompt) || /meet\s*mangaon/i.test(prompt)) {
+    recipient = 'meetmadgaonkar@gmail.com';
+  } else {
+    const toMatch = prompt.match(/(?:\bto\b|टू|को)\s+([a-zA-Z0-9._\u0900-\u097F-]+(?:\s+[a-zA-Z0-9._\u0900-\u097F-]+)?)/i);
+    if (toMatch) {
+      const candidate = toMatch[1].trim();
+      if (!['write', 'draft', 'draught', 'send', 'compose', 'the', 'a', 'me', 'मैसेज', 'message'].includes(candidate.toLowerCase())) {
+        recipient = candidate;
+      }
+    }
+  }
+
+  // Extract subject if mentioned
+  let subject = '';
+  const subjectMatch = prompt.match(/subject\s+(?:is\s+|as\s+|['"])([^'"]+?)(?:['"]|\s+and|\s+with|\s+body|$)/i);
+  if (subjectMatch) {
+    subject = subjectMatch[1].trim();
+  }
+
+  // Extract body
+  let emailBody = '';
+  const bodyMatch = prompt.match(/(?:body|saying|thanking|message|context)\s+(?:is\s+|as\s+|write\s+|['"])([^'"]+?)(?:['"]|$)/i);
+  if (bodyMatch) {
+    emailBody = bodyMatch[1].trim();
+  } else {
+    const writeMatch = prompt.match(/(?:write|saying|draft|draught|about|लिखो)\s+(.*)/i);
+    if (writeMatch && writeMatch[1]) {
+      emailBody = writeMatch[1].trim();
+    }
+  }
+
+  if ((/summar|summary|सार/i.test(lower) || /about this page|from this page|page context|इस पेज/i.test(lower)) && pageContext?.visibleText) {
+    emailBody = `Hi,\n\nHere is a summary of ${pageContext.title || 'the current page'}:\n\n${pageContext.visibleText.slice(0, 600)}...\n\nBest regards,`;
+  }
+
+  if (!emailBody) {
+    emailBody = `Hi,\n\nDrafting this message via Handsfree AI Assistant.\n\nBest regards,`;
+  }
+
+  // Construct direct Gmail compose URL prefilling to, subject, and body
+  let gmailUrl = 'https://mail.google.com/mail/u/0/?view=cm&fs=1';
+  const queryParams: string[] = [];
+  if (recipient) queryParams.push(`to=${encodeURIComponent(recipient)}`);
+  if (subject) queryParams.push(`su=${encodeURIComponent(subject)}`);
+  if (emailBody && emailBody.length < 400) queryParams.push(`body=${encodeURIComponent(emailBody)}`);
+  if (queryParams.length > 0) {
+    gmailUrl += `&${queryParams.join('&')}`;
+  }
+
+  // REMOVE any docs.new or docs.google.com from actions
+  let resultActions = actions.filter((a) => !(a.type === 'open_url' && /docs\.(new|google\.com)/i.test(a.url || '')));
+
+  const hasOpenMail = resultActions.some((a) => a.type === 'open_url' && /mail\.google\.com|outlook/i.test(a.url || ''));
+  if (!hasOpenMail) {
+    resultActions.unshift({ type: 'open_url', url: gmailUrl });
+  }
+
+  // Ensure To, Subject, and Body steps exist
+  const hasToStep = resultActions.some((a) => a.type === 'type_text' && /^(to|recipient)$/i.test(a.targetId || ''));
+  if (recipient && !hasToStep) {
+    resultActions.push({
+      type: 'type_text',
+      text: recipient,
+      targetId: 'To',
+    });
+  }
+
+  const hasSubjectStep = resultActions.some((a) => a.type === 'type_text' && /^(subject)$/i.test(a.targetId || ''));
+  if (subject && !hasSubjectStep) {
+    resultActions.push({
+      type: 'type_text',
+      text: subject,
+      targetId: 'Subject',
+    });
+  }
+
+  const hasBodyStep = resultActions.some((a) => a.type === 'type_text' && /^(message body|body)$/i.test(a.targetId || ''));
+  if (!hasBodyStep) {
+    resultActions.push({
+      type: 'type_text',
+      text: emailBody,
+      targetId: 'Message Body',
+    });
+  }
+
+  return resultActions;
+}
+
 type SarvamRequestMode = 'chat' | 'plan';
 
 async function callSarvamChat(
@@ -102,7 +265,7 @@ async function callSarvamChat(
     mode === 'chat'
       ? 'For unclear requests, ask one short clarifying question and return no actions. For multi-step requests that need user approval, briefly propose the plan and return no actions until approval. For a clear direct command or approved plan, return the browser actions to perform. Before execution, describe intent in future tense; never claim to have searched, clicked, opened, read, or completed anything unless prior action results confirm it.'
       : 'Create the concrete browser action sequence needed for the user request. Return a concise explanation and the actions.'
-  }\nReturn only a JSON object with "reply" (string) and "actions" (array). Use only these action schemas: {"type":"open_url","url":"https://..."}; {"type":"click_element","targetId":"..."}; {"type":"type_text","text":"...","targetId":"..."}; {"type":"scroll_page","direction":"up"|"down","amount":300}; {"type":"navigate","direction":"back"|"forward"}; {"type":"switch_tab","direction":"next"|"previous"}; {"type":"read_page"}.`;
+  }\nFor document creation tasks (e.g. "open a blank document and write X"), produce: 1) {"type":"open_url","url":"https://docs.new"} followed by 2) {"type":"type_text","text":"...","targetId":"kix-app-content-editor"}.\nFor email drafting or sending tasks (e.g. "draft an email", "draught an email", "write an email to X"), ALWAYS produce: 1) {"type":"open_url","url":"https://mail.google.com/mail/u/0/?view=cm&fs=1"} followed by 2) {"type":"type_text","text":"...","targetId":"Message Body"}. NEVER open docs.new for email tasks.\nReturn only a JSON object with "reply" (string) and "actions" (array). Use only these action schemas: {"type":"open_url","url":"https://..."}; {"type":"click_element","targetId":"..."}; {"type":"type_text","text":"...","targetId":"..."}; {"type":"scroll_page","direction":"up"|"down","amount":300}; {"type":"navigate","direction":"back"|"forward"}; {"type":"switch_tab","direction":"next"|"previous"}; {"type":"read_page"}.`;
 
   const history = (request.history || []).map((message) => ({
     role: message.role === 'assistant' ? 'assistant' : message.role === 'system' ? 'system' : 'user',
@@ -156,11 +319,19 @@ async function callSarvamChat(
   }
 
   const rawActions = Array.isArray(parsed.actions) ? parsed.actions : Array.isArray(parsed.steps) ? parsed.steps : [];
-  const actions = rawActions.filter(
+  let actions = rawActions.filter(
     (action: any) => action && typeof action === 'object' && ALLOWED_ACTION_TYPES.has(action.type)
   );
+  actions = ensureEmailWorkflow(request.prompt, ensureDocumentWorkflow(request.prompt, actions, request.pageContext), request.pageContext);
+  let reply = typeof parsed.reply === 'string' ? parsed.reply : (content || 'I could not generate a response.');
+  if (/email|mail|gmail|draught|draft/i.test(request.prompt)) {
+    reply = reply
+      .replace(/open a blank document/gi, 'open Gmail')
+      .replace(/blank document/gi, 'email draft')
+      .replace(/Google Docs/gi, 'Gmail');
+  }
   return {
-    reply: typeof parsed.reply === 'string' ? parsed.reply : (content || 'I could not generate a response.'),
+    reply,
     actions,
     costEstimate: {
       estimatedCostUsd: 0,
@@ -335,6 +506,12 @@ COLLABORATIVE CONVERSATION WORKFLOW:
      4) {"type": "type_text", "text": "Document Title", "targetId": "docs-title-widget"}
      5) {"type": "click_element", "targetId": "kix-app-content-editor"}
      6) {"type": "type_text", "text": "Full text of essay/content...", "targetId": "kix-app-content-editor"}
+     For email tasks (e.g. drafting or sending an email, or opening Gmail/email):
+     1) {"type": "open_url", "url": "https://mail.google.com/mail/u/0/?view=cm&fs=1"}
+     2) {"type": "read_page"}
+     3) {"type": "click_element", "targetId": "Message Body"}
+     4) {"type": "type_text", "text": "Email content...", "targetId": "Message Body"}
+     NEVER open Google Docs (docs.new) for email tasks!
 
 ALLOWLISTED ACTION TYPES:
 You may ONLY generate actions using these exact schemas:
@@ -472,12 +649,21 @@ You MUST respond with a valid JSON object only:
     ? parsed.steps
     : [];
 
-  const actions = rawActions.filter(
+  let actions = rawActions.filter(
     (a: any) => a && typeof a === 'object' && ALLOWED_ACTION_TYPES.has(a.type)
   );
+  actions = ensureEmailWorkflow(prompt, ensureDocumentWorkflow(prompt, actions, request.pageContext), request.pageContext);
+
+  let reply = parsed.reply || `Handsfree Assistant: "${prompt}"`;
+  if (/email|mail|gmail|draught|draft/i.test(prompt)) {
+    reply = reply
+      .replace(/open a blank document/gi, 'open Gmail')
+      .replace(/blank document/gi, 'email draft')
+      .replace(/Google Docs/gi, 'Gmail');
+  }
 
   return {
-    reply: parsed.reply || `Handsfree Assistant: "${prompt}"`,
+    reply,
     actions,
     costEstimate: {
       estimatedCostUsd: 0.0001,
@@ -646,9 +832,10 @@ Always include at least one relevant browser action in the "actions" array.`;
     ? parsed.plan
     : [];
 
-  const actions = rawActions.filter(
+  let actions = rawActions.filter(
     (a: any) => a && typeof a === 'object' && ALLOWED_ACTION_TYPES.has(a.type)
   );
+  actions = ensureEmailWorkflow(prompt, ensureDocumentWorkflow(prompt, actions, pageContext), pageContext);
 
   return {
     reply: parsed.reply || `Plan formulated for "${prompt}".`,

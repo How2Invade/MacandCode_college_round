@@ -94,8 +94,26 @@ export class WebpageCursorController implements ICursorController {
         ? (document.elementFromPoint(this.currentPx, this.currentPy) as HTMLElement | null)
         : null);
     if (!target) return false;
-    target.focus?.({ preventScroll: true });
-    target.click();
+    
+    // Focus target element
+    try { target.focus?.({ preventScroll: true }); } catch {}
+
+    // Dispatch full mouse event sequence for framework and SPA compatibility (React, Vue, Google, etc.)
+    const eventInit: MouseEventInit = {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: this.currentPx,
+      clientY: this.currentPy,
+      button: 0,
+      buttons: 1
+    };
+    target.dispatchEvent(new MouseEvent('mousedown', eventInit));
+    target.dispatchEvent(new MouseEvent('mouseup', eventInit));
+    target.dispatchEvent(new MouseEvent('click', eventInit));
+    if (typeof target.click === 'function') {
+      try { target.click(); } catch {}
+    }
     this.triggerClickVisual('left');
     return true;
   }

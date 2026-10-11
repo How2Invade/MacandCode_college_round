@@ -122,12 +122,12 @@ export interface GestureConfig {
 }
 
 export const DEFAULT_GESTURE_CONFIG: GestureConfig = {
-  blinkCandidateThreshold: 0.25, // start freezing cursor
-  blinkClickThreshold: 0.30,     // must reach here within confirm window
-  blinkResetThreshold: 0.15,     // must open eyes this far to reset
-  blinkConfirmFrames: 1,         // ~1 frame for quick blinks (blinks are very fast)
-  doubleBlinkWindowMs: 800,      // wait up to 800ms for second blink
-  clickCooldownMs: 500,
+  blinkCandidateThreshold: 0.22, // Early freeze cursor & start candidate
+  blinkClickThreshold: 0.28,     // Definite intentional blink peak
+  blinkResetThreshold: 0.16,     // Hysteresis eye reopening threshold
+  blinkConfirmFrames: 1,         // Quick responsive detection
+  doubleBlinkWindowMs: 950,      // Comfortable double-blink window (up to 950ms)
+  clickCooldownMs: 450,          // Quick re-arming
 
   tabTurnThresholdDeg: 25,       // degrees from neutral to start pending
   tabTurnHoldThresholdDeg: 22,   // must stay above this during confirm
@@ -338,21 +338,20 @@ export class GestureStateMachine {
       }
 
       case 'BLINK_1_PENDING': {
-        if (val < this.cfg.blinkCandidateThreshold) {
-          // Blink was too short or cancelled
-          if (this.blinkConfirmCount >= this.cfg.blinkConfirmFrames && this.peakBlinkScore >= this.cfg.blinkClickThreshold) {
-             // Valid blink 1 completed!
-             this.blinkState = 'WAITING_FOR_BLINK_2';
-             this.doubleBlinkTimeoutUntil = nowMs + this.cfg.doubleBlinkWindowMs;
-             // DO NOT freeze during the wait, so natural single blinks don't freeze the cursor!
-             return { action: 'NONE', freeze: false, progress: 0.5 };
-          }
-          this.cancelBlink('Blink 1 too short');
-          return { action: 'NONE', freeze: false, progress: 0 };
-        }
-
         this.blinkConfirmCount++;
         this.peakBlinkScore = Math.max(this.peakBlinkScore, val);
+
+        // If eyes reopen or drop below candidate threshold
+        if (val < this.cfg.blinkCandidateThreshold) {
+          if (this.peakBlinkScore >= this.cfg.blinkClickThreshold) {
+            // Valid blink 1 completed! Move to waiting for blink 2
+            this.blinkState = 'WAITING_FOR_BLINK_2';
+            this.doubleBlinkTimeoutUntil = nowMs + this.cfg.doubleBlinkWindowMs;
+            return { action: 'NONE', freeze: false, progress: 0.5 };
+          }
+          this.cancelBlink('Blink 1 too shallow');
+          return { action: 'NONE', freeze: false, progress: 0 };
+        }
 
         return { action: 'NONE', freeze: true, progress: 0.25 };
       }
@@ -363,6 +362,7 @@ export class GestureStateMachine {
           return { action: 'NONE', freeze: false, progress: 0 };
         }
         
+        // Eyes must reopen below reset threshold before registering blink 2
         if (val >= this.cfg.blinkCandidateThreshold) {
           // Blink 2 started
           this.blinkState = 'BLINK_2_PENDING';
@@ -375,21 +375,18 @@ export class GestureStateMachine {
       }
       
       case 'BLINK_2_PENDING': {
-        if (val < this.cfg.blinkCandidateThreshold) {
-          if (this.blinkConfirmCount >= this.cfg.blinkConfirmFrames && this.peakBlinkScore >= this.cfg.blinkClickThreshold) {
-             this.blinkState = 'CLICKED';
-             return { action: 'NONE', freeze: true, progress: 1 };
-          }
-          this.cancelBlink('Blink 2 too short');
-          return { action: 'NONE', freeze: false, progress: 0 };
-        }
-
         this.blinkConfirmCount++;
         this.peakBlinkScore = Math.max(this.peakBlinkScore, val);
 
-        if (this.blinkConfirmCount >= this.cfg.blinkConfirmFrames && this.peakBlinkScore >= this.cfg.blinkClickThreshold) {
-             this.blinkState = 'CLICKED';
-             return { action: 'NONE', freeze: true, progress: 1 };
+        // Either reaching the peak threshold or reopening after hitting peak confirms the double blink click!
+        if (this.peakBlinkScore >= this.cfg.blinkClickThreshold) {
+          this.blinkState = 'CLICKED';
+          return { action: 'NONE', freeze: true, progress: 1 };
+        }
+
+        if (val < this.cfg.blinkCandidateThreshold) {
+          this.cancelBlink('Blink 2 too shallow');
+          return { action: 'NONE', freeze: false, progress: 0 };
         }
         
         return { action: 'NONE', freeze: true, progress: 0.75 };

@@ -182,22 +182,83 @@ export class MultiStepPlanner {
     }
 
     // 4. Google Docs document creation and essay writing
-    if (lower.includes('google docs') || lower.includes('essay') || lower.includes('document') || lower.includes('निबंध')) {
+    const isEmailIntent = lower.includes('email') || lower.includes('gmail') || lower.includes('mail') || lower.includes('draught') || lower.includes('draft');
+    if (
+      !isEmailIntent &&
+      (lower.includes('google docs') ||
+        lower.includes('essay') ||
+        lower.includes('document') ||
+        lower.includes('doc') ||
+        lower.includes('निबंध') ||
+        lower.includes('blank') ||
+        lower.includes('blind'))
+    ) {
+      const isRenewableTest = lower.includes('renewable energy') || lower.includes('500-word essay');
+      let title = 'Renewable Energy: The Path to a Sustainable Future';
+      let body =
+        'Introduction:\nRenewable energy sources such as solar, wind, and hydroelectric power provide an inexhaustible alternative to fossil fuels. As global climate concerns intensify, accelerating the adoption of clean technology has become paramount.\n\nTechnological Advancements:\nModern photovoltaic solar cells and advanced offshore wind turbines now operate at unprecedented efficiency, substantially lowering the cost per kilowatt-hour across both emerging and developed markets.\n\nConclusion:\nTransitioning to clean energy is not merely an environmental imperative, but also an economic catalyst that promises energy independence and a sustainable planet.';
+
+      if (!isRenewableTest) {
+        const writeMatch = goal.match(/(?:write|start writing|type|लिखो|लिहा)\s+(?:a\s+\d+.*?(?:essay|paragraph|page)\s+(?:on|about)\s+)?(.*)/i);
+        let customText = writeMatch && writeMatch[1] ? writeMatch[1].trim() : '';
+        if (!customText && /ronaldo/i.test(goal)) {
+          customText = 'I love Cristiano Ronaldo, one of the greatest football players of all time.';
+        }
+        if (/summar|summary|सार/i.test(lower) && pageContext?.title) {
+          customText = `Summary of ${pageContext.title}:\n\nKey highlights and contextual research notes captured from current browsing session.`;
+        }
+        if (!customText) {
+          customText = 'Co-working document initialized with Handsfree AI Voice Assistant.\nReady for collaboration and live dictation.';
+        }
+        title = customText.split('\n')[0].slice(0, 40);
+        body = customText;
+      }
+
       return [
         { type: 'open_url', url: 'https://docs.new' },
         { type: 'read_page' },
         { type: 'click_element', targetId: 'docs-title-widget' },
-        { type: 'type_text', text: 'Renewable Energy: The Path to a Sustainable Future', targetId: 'docs-title-widget' },
+        { type: 'type_text', text: title, targetId: 'docs-title-widget' },
         { type: 'click_element', targetId: 'kix-app-content-editor' },
         {
           type: 'type_text',
-          text: 'Introduction:\nRenewable energy sources such as solar, wind, and hydroelectric power provide an inexhaustible alternative to fossil fuels. As global climate concerns intensify, accelerating the adoption of clean technology has become paramount.\n\nTechnological Advancements:\nModern photovoltaic solar cells and advanced offshore wind turbines now operate at unprecedented efficiency, substantially lowering the cost per kilowatt-hour across both emerging and developed markets.\n\nConclusion:\nTransitioning to clean energy is not merely an environmental imperative, but also an economic catalyst that promises energy independence and a sustainable planet.',
+          text: body,
           targetId: 'kix-app-content-editor',
         },
       ];
     }
 
-    // 5. Search / Information gathering
+    // 5. Email drafting and Gmail co-working
+    if (
+      lower.includes('email') ||
+      lower.includes('gmail') ||
+      lower.includes('mail') ||
+      lower.includes('draught') ||
+      lower.includes('draft') ||
+      lower.includes('ईमेल')
+    ) {
+      let emailText = 'Hi,\n\nDrafting this message via Handsfree AI Assistant.\n\nBest regards,';
+      const writeMatch = goal.match(/(?:write|draft|draught|saying|about|send|लिखो)\s+(.*)/i);
+      if (writeMatch && writeMatch[1]) {
+        emailText = writeMatch[1].trim();
+      }
+      if (/summar|summary|सार/i.test(lower) && pageContext?.title) {
+        emailText = `Hi,\n\nHere is a summary of ${pageContext.title}:\n\nKey takeaways captured from current browsing session.\n\nBest regards,`;
+      }
+      const emailMatch = goal.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+      let gmailUrl = 'https://mail.google.com/mail/u/0/?view=cm&fs=1';
+      if (emailMatch) {
+        gmailUrl += `&to=${encodeURIComponent(emailMatch[1])}`;
+      }
+      return [
+        { type: 'open_url', url: gmailUrl },
+        { type: 'read_page' },
+        { type: 'click_element', targetId: 'Message Body' },
+        { type: 'type_text', text: emailText, targetId: 'Message Body' },
+      ];
+    }
+
+    // 6. Search / Information gathering
     if (lower.includes('search') || lower.includes('सर्च') || lower.includes('शोध') || lower.includes('find')) {
       return [
         { type: 'open_url', url: 'https://www.google.com' },

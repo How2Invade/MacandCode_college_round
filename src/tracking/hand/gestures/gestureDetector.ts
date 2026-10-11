@@ -16,7 +16,7 @@ import { NormalizedLandmark, LANDMARK, GestureEvent, HandTrackingConfig } from '
 export type GestureEventListener = (event: GestureEvent) => void;
 
 type GestureState = 'none' | 'pinching' | 'holding';
-type Candidate = 'pinch' | 'air_click' | 'none' | 'scroll' | 'zoom_in' | 'zoom_out' | 'tab_next' | 'tab_previous' | 'scroll_up' | 'scroll_down' | 'undo' | 'redo' | 'thumbs_up' | 'thumbs_down' | 'shaka' | 'palm_open' | 'fist';
+type Candidate = 'pinch' | 'air_click' | 'none' | 'scroll' | 'zoom_in' | 'zoom_out' | 'tab_next' | 'tab_previous' | 'scroll_up' | 'scroll_down' | 'undo' | 'redo' | 'thumbs_up' | 'thumbs_down' | 'shaka' | 'palm_open' | 'fist' | 'screenshot';
 
 export class GestureDetector {
   private state: GestureState = 'none';
@@ -55,7 +55,19 @@ export class GestureDetector {
    * Process one frame of landmarks.
    * Must be called once per frame even if no hand is detected (pass null).
    */
-  process(landmarks: NormalizedLandmark[] | null, timestamp: number): void {
+  process(landmarks: NormalizedLandmark[] | null, timestamp: number, allHands?: NormalizedLandmark[][]): void {
+    if (!landmarks && (!allHands || allHands.length === 0)) {
+      this.handleLandmarksLost(timestamp);
+      return;
+    }
+
+    // 1. Two-hand camera frame easter egg check takes highest precedence
+    const isCameraFrame = Boolean(allHands && allHands.length >= 2 && this.isCameraFrameGesture(allHands));
+    if (isCameraFrame) {
+      this.handleCommandCandidate('screenshot', timestamp);
+      return;
+    }
+
     if (!landmarks) {
       this.handleLandmarksLost(timestamp);
       return;
@@ -215,7 +227,7 @@ export class GestureDetector {
       }
       const dx = handCenter.x - this.threeFingerSwipeOrigin.x;
       const dy = handCenter.y - this.threeFingerSwipeOrigin.y;
-      if (Math.max(Math.abs(dx), Math.abs(dy)) < 0.10) return null;
+      if (Math.max(Math.abs(dx), Math.abs(dy)) < 0.07) return null;
       // Must be a predominantly vertical swipe
       if (Math.abs(dy) >= Math.abs(dx)) {
         return dy < 0 ? 'scroll_up' : 'scroll_down';
@@ -245,10 +257,15 @@ export class GestureDetector {
     }
     const movementX = center.x - this.swipeOrigin.x;
     const movementY = center.y - this.swipeOrigin.y;
-    if (Math.max(Math.abs(movementX), Math.abs(movementY)) < 0.16) return null;
-    if (Math.abs(movementX) >= Math.abs(movementY)) {
+    
+    // Predominantly horizontal swipe: tab switch
+    if (Math.abs(movementX) > Math.abs(movementY)) {
+      if (Math.abs(movementX) < 0.12) return null;
       return movementX > 0 ? 'tab_next' : 'tab_previous';
     }
+    
+    // Predominantly vertical swipe: scroll up / scroll down
+    if (Math.abs(movementY) < 0.07) return null;
     return movementY > 0 ? 'scroll_down' : 'scroll_up';
   }
 
@@ -369,8 +386,36 @@ export class GestureDetector {
     }
   }
 
+  /**
+   * Two-hand "Camera Frame" Easter Egg gesture:
+   * Both hands form an "L" framing pose (index and thumb extended, other 3 fingers curled).
+   * Forms a framing rectangle (like a camera viewfinder).
+   */
+  public isCameraFrameGesture(hands: NormalizedLandmark[][]): boolean {
+    if (hands.length < 2) return false;
+    const [h1, h2] = hands;
+
+    const isFramingHand = (h: NormalizedLandmark[]) => {
+      const palmWidth = this.estimatePalmWidth(h);
+      const indexExt = this.isFingerExtended(h, LANDMARK.INDEX_TIP, LANDMARK.INDEX_MCP);
+      const thumbExt = this.isFingerExtended(h, LANDMARK.THUMB_TIP, LANDMARK.THUMB_MCP) ||
+        this.dist2D(h[LANDMARK.THUMB_TIP], h[LANDMARK.INDEX_MCP]) > palmWidth * 0.60;
+      const midCurled = !this.isFingerExtended(h, LANDMARK.MIDDLE_TIP, LANDMARK.MIDDLE_MCP);
+      const ringCurled = !this.isFingerExtended(h, LANDMARK.RING_TIP, LANDMARK.RING_MCP);
+      const pinkyCurled = !this.isFingerExtended(h, LANDMARK.PINKY_TIP, LANDMARK.PINKY_MCP);
+      const curledCount = (midCurled ? 1 : 0) + (ringCurled ? 1 : 0) + (pinkyCurled ? 1 : 0);
+      return indexExt && thumbExt && curledCount >= 2;
+    };
+
+    if (!isFramingHand(h1) || !isFramingHand(h2)) return false;
+
+    // Both hands must be spaced apart in camera view to form a frame
+    const wristDist = this.dist2D(h1[LANDMARK.WRIST], h2[LANDMARK.WRIST]);
+    return wristDist > 0.08;
+  }
+
   private handleCommandCandidate(
-    command: 'zoom_in' | 'zoom_out' | 'tab_next' | 'tab_previous' | 'scroll_up' | 'scroll_down' | 'undo' | 'redo' | 'thumbs_up' | 'thumbs_down' | 'shaka' | 'palm_open' | 'fist',
+    command: 'zoom_in' | 'zoom_out' | 'tab_next' | 'tab_previous' | 'scroll_up' | 'scroll_down' | 'undo' | 'redo' | 'thumbs_up' | 'thumbs_down' | 'shaka' | 'palm_open' | 'fist' | 'screenshot',
     timestamp: number
   ): void {
     if (this.candidate !== command) {
@@ -379,15 +424,28 @@ export class GestureDetector {
       this.discreteEmitted = false;
     }
     this.candidateFrames++;
+
+    const isScrollCommand = command === 'scroll_up' || command === 'scroll_down';
+    const isScreenshot = command === 'screenshot';
+    const cooldownMs = isScreenshot ? 2500 : isScrollCommand ? 180 : this.config.gestureCooldownMs;
+    const canEmit = isScrollCommand
+      ? (timestamp - this.lastEventMs >= cooldownMs)
+      : (!this.discreteEmitted && timestamp - this.lastEventMs >= cooldownMs);
+
     if (
       this.candidateFrames >= this.config.gestureDebounceFrames &&
-      !this.discreteEmitted &&
-      timestamp - this.lastEventMs >= this.config.gestureCooldownMs
+      canEmit
     ) {
       const gesture = command as GestureEvent['gesture'];
-      this.emit({ type: command, gesture, confidence: 0.95, timestamp, metric: 1 });
+      this.emit({ type: command, gesture, confidence: 0.98, timestamp, metric: 1 });
       this.lastEventMs = timestamp;
       this.discreteEmitted = true;
+      if (isScrollCommand) {
+        this.swipeOrigin = null;
+        this.threeFingerSwipeOrigin = null;
+      } else if (command === 'tab_next' || command === 'tab_previous') {
+        this.swipeOrigin = null;
+      }
     }
   }
 

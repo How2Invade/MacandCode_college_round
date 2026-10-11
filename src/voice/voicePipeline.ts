@@ -38,7 +38,7 @@ export class VoicePipeline {
     this.currentLanguage = options.initialLanguage || 'en';
 
     // Auto-select Web Speech if available, otherwise mock provider
-    const isBrowser = typeof window !== 'undefined' && 'webkitSpeechRecognition' in window;
+    const isBrowser = typeof window !== 'undefined' && ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window);
     this.stt = options.sttProvider || (isBrowser ? new WebSpeechSTTProvider() : new MockVoiceRecognizer());
     this.tts = options.ttsProvider || (typeof window !== 'undefined' ? new WebSpeechTTSProvider() : new MockVoiceSynthesizer());
 

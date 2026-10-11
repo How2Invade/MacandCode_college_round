@@ -501,18 +501,21 @@ export class HandTracker implements ITracker {
         detectedHands: detectedHands.length,
         selection: selectorState,
       });
-      this.gestures.process(null, timestamp);
+      const allHandsLandmarks = detectedHands.map((h) => h.landmarks);
+      this.gestures.process(null, timestamp, allHandsLandmarks);
       // Await a stable hand without stopping the camera loop. Previously this
       // transitioned the global tracker to `lost`, but the loop intentionally
       // only runs while active/calibrating—so it processed exactly one frame.
       return;
     }
 
+    const allHandsLandmarks = detectedHands.map((h) => h.landmarks);
+    const isCameraFraming = detectedHands.length >= 2 && this.gestures.isCameraFrameGesture(allHandsLandmarks);
+
     // An open palm must never drive the cursor.  Only a deliberate pointing
     // pose (index extended while the other fingers are folded) may emit a
-    // pointer position.  The gesture processor still receives every frame so
-    // thumb–index pinches continue to work after the cursor is positioned.
-    const isPointing = this.isIndexPointingPose(selectedLandmarks);
+    // pointer position. When forming the camera-framing easter egg, inhibit cursor.
+    const isPointing = !isCameraFraming && this.isIndexPointingPose(selectedLandmarks);
     this.lastPointingPose = isPointing;
     if (isPointing) {
       const tip: NormalizedLandmark = selectedLandmarks[LANDMARK.INDEX_TIP];
@@ -545,7 +548,7 @@ export class HandTracker implements ITracker {
     }
 
     // Process gestures
-    this.gestures.process(selectedLandmarks, timestamp);
+    this.gestures.process(selectedLandmarks, timestamp, allHandsLandmarks);
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────────────

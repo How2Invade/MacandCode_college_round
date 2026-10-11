@@ -58,7 +58,7 @@ export class ChromeActionExecutor implements IBrowserActionExecutor {
   public async canExecute(action: BrowserAction): Promise<boolean> {
     // Basic validation
     if (action.type === 'open_url') return !!action.url;
-    if (action.type === 'type_text') return !!action.text && !!action.targetId;
+    if (action.type === 'type_text') return typeof action.text === 'string' && action.text.length > 0;
     if (action.type === 'click_element') return !!action.targetId;
     return true;
   }

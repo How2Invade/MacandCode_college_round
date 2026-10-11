@@ -43,57 +43,102 @@ export class WebSpeechSTTProvider implements IVoiceRecognizer {
   private state: VoiceState = 'idle';
   private currentLanguage: SupportedLanguage = 'en';
   private active = false;
+  private activeStream: MediaStream | null = null;
+  private silenceTimer: any = null;
+  private lastPartialTranscript = '';
 
   private resultListeners: ((result: VoiceRecognitionResult) => void)[] = [];
   private errorListeners: ((error: string) => void)[] = [];
   private stateListeners: ((state: VoiceState) => void)[] = [];
 
   constructor() {
-    this.initRecognition();
+    // Recognition instance is initialized per listening session in startListening()
   }
 
-  private initRecognition(): void {
-    if (typeof window === 'undefined') return;
+  public async startListening(
+    language: SupportedLanguage,
+    options?: VoiceInputOptions
+  ): Promise<void> {
+    this.currentLanguage = language;
+    const config = LANGUAGE_CONFIGS[language] || LANGUAGE_CONFIGS.en;
+
+    // 1. Acquire and verify microphone audio stream, keeping track alive for browser capture
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: options?.echoCancellation ?? true,
+            noiseSuppression: options?.noiseSuppression ?? true,
+            autoGainControl: true,
+          },
+        });
+        const audioTracks = stream.getAudioTracks();
+        if (!audioTracks || audioTracks.length === 0 || !audioTracks[0].enabled) {
+          throw new Error('No live audio tracks received from microphone.');
+        }
+
+        // Clean up prior stream if any
+        if (this.activeStream) {
+          this.activeStream.getTracks().forEach((track) => track.stop());
+        }
+        // Retain live audio track for the entire listening session
+        this.activeStream = stream;
+      } catch (err: any) {
+        this.setState('error');
+        const isDenied =
+          err?.name === 'NotAllowedError' ||
+          err?.name === 'PermissionDeniedError' ||
+          err?.message?.includes('denied') ||
+          err?.message?.includes('not-allowed');
+        const message = isDenied ? config.strings.micPermissionDenied : (err?.message || 'Microphone error.');
+        this.emitError(message);
+        throw err;
+      }
+    }
 
     const SpeechRecognition =
       (window as unknown as { SpeechRecognition?: SpeechRecognitionConstructor }).SpeechRecognition ||
       (window as unknown as { webkitSpeechRecognition?: SpeechRecognitionConstructor }).webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      logger.warn('WebSpeechSTT', 'SpeechRecognition API is not supported in this browser window.');
-      return;
+      this.setState('error');
+      const err = config.strings.speechNotSupported;
+      this.emitError(err);
+      throw new Error(err);
     }
+
+    // Clean up prior recognition instance
+    if (this.recognition) {
+      try {
+        this.recognition.abort();
+      } catch {
+        // Ignore
+      }
+      this.recognition = null;
+    }
+
+    if (this.silenceTimer) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+    }
+    this.lastPartialTranscript = '';
 
     try {
       this.recognition = new SpeechRecognition();
-      this.recognition.continuous = false;
-      this.recognition.interimResults = true;
+      this.recognition.continuous = options?.continuous ?? true;
+      this.recognition.interimResults = options?.interimResults ?? true;
+      this.recognition.lang = config.speechRecognitionLocale;
 
       this.recognition.onstart = () => {
+        this.active = true;
         this.setState('listening');
-        logger.info('WebSpeechSTT', `Microphone capture active for language: [${this.currentLanguage}]`);
-      };
-
-      this.recognition.onend = () => {
-        this.active = false;
-        if (this.state === 'listening' || this.state === 'processing') {
-          this.setState('idle');
-        }
-        logger.info('WebSpeechSTT', 'Microphone capture ended.');
-      };
-
-      this.recognition.onerror = (event) => {
-        this.active = false;
-        this.setState('error');
-        const errorMsg = event.error || 'Unknown speech recognition error';
-        logger.error('WebSpeechSTT', `Speech recognition error: ${errorMsg}`);
-        this.emitError(errorMsg);
+        logger.info('WebSpeechSTT', `Microphone capture active for language: [${this.currentLanguage}] (${config.speechRecognitionLocale})`);
       };
 
       this.recognition.onresult = (event) => {
         let finalTranscript = '';
         let interimTranscript = '';
-        let confidence = 0.85;
+        let confidence = 0.9;
 
         for (let i = event.resultIndex; i < event.results.length; ++i) {
           const item = event.results[i];
@@ -107,69 +152,86 @@ export class WebSpeechSTTProvider implements IVoiceRecognizer {
           }
         }
 
-        const transcript = finalTranscript || interimTranscript;
-        const isFinal = Boolean(finalTranscript);
+        const currentText = (finalTranscript || interimTranscript).trim();
+        const isFinal = Boolean(finalTranscript.trim());
 
-        if (isFinal) {
-          this.setState('processing');
-        }
-
-        if (transcript.trim()) {
+        if (currentText) {
+          this.lastPartialTranscript = currentText;
           const result: VoiceRecognitionResult = {
-            transcript: transcript.trim(),
+            transcript: currentText,
             language: this.currentLanguage,
-            confidence: Math.round(confidence * 100) / 100,
+            confidence: isFinal ? Math.round(confidence * 100) / 100 : 0.5,
             isFinal,
           };
           this.emitResult(result);
         }
+
+        if (isFinal) {
+          if (this.silenceTimer) clearTimeout(this.silenceTimer);
+          this.lastPartialTranscript = '';
+        } else if (currentText) {
+          // Auto-commit on 1.2s silence pause so conversational assistant responds naturally
+          if (this.silenceTimer) clearTimeout(this.silenceTimer);
+          this.silenceTimer = setTimeout(() => {
+            if (this.active && this.lastPartialTranscript) {
+              const textToSend = this.lastPartialTranscript;
+              this.lastPartialTranscript = '';
+              this.emitResult({
+                transcript: textToSend,
+                language: this.currentLanguage,
+                confidence: 0.85,
+                isFinal: true,
+              });
+            }
+          }, 1200);
+        }
       };
-    } catch (err) {
-      logger.error('WebSpeechSTT', 'Failed to initialize SpeechRecognition instance', err);
-    }
-  }
 
-  public async startListening(
-    language: SupportedLanguage,
-    options?: VoiceInputOptions
-  ): Promise<void> {
-    this.currentLanguage = language;
-    const config = LANGUAGE_CONFIGS[language] || LANGUAGE_CONFIGS.en;
-
-    // 1. Verify microphone permission via navigator.mediaDevices if available
-    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: options?.echoCancellation ?? true,
-            noiseSuppression: options?.noiseSuppression ?? true,
-            autoGainControl: true,
-          },
-        });
-        // Immediately stop temporary permission probe tracks so we don't hold raw audio
-        stream.getTracks().forEach((track) => track.stop());
-      } catch {
+      this.recognition.onerror = (event) => {
+        if (event.error === 'no-speech') {
+          // Pause in speech, do not tear down the session
+          return;
+        }
+        logger.error('WebSpeechSTT', `Speech recognition error: ${event.error}`);
+        this.active = false;
         this.setState('error');
-        const message = config.strings.micPermissionDenied;
-        this.emitError(message);
-        throw new Error(message);
-      }
-    }
+        this.emitError(event.error || 'Speech recognition error');
+      };
 
-    if (!this.recognition) {
-      this.setState('error');
-      const err = config.strings.speechNotSupported;
-      this.emitError(err);
-      throw new Error(err);
-    }
+      this.recognition.onend = () => {
+        if (this.silenceTimer) {
+          clearTimeout(this.silenceTimer);
+          this.silenceTimer = null;
+        }
+        // If the user is still actively listening, Chrome SpeechRecognition auto-ends after silence. Restart if active.
+        if (this.active) {
+          try {
+            this.recognition?.start();
+            return;
+          } catch {
+            // Drop to idle if restart is rejected
+          }
+        }
+        this.active = false;
+        if (this.activeStream) {
+          this.activeStream.getTracks().forEach((track) => track.stop());
+          this.activeStream = null;
+        }
+        if (this.state === 'listening' || this.state === 'processing') {
+          this.setState('idle');
+        }
+        logger.info('WebSpeechSTT', 'Microphone capture ended.');
+      };
 
-    try {
-      this.recognition.lang = config.speechRecognitionLocale;
-      this.recognition.continuous = options?.continuous ?? false;
-      this.recognition.interimResults = options?.interimResults ?? true;
-      this.recognition.start();
       this.active = true;
+      this.setState('listening');
+      this.recognition.start();
     } catch (err) {
+      this.active = false;
+      if (this.activeStream) {
+        this.activeStream.getTracks().forEach((track) => track.stop());
+        this.activeStream = null;
+      }
       this.setState('error');
       const msg = `Unable to start speech recognition: ${(err as Error).message}`;
       this.emitError(msg);
@@ -178,14 +240,26 @@ export class WebSpeechSTTProvider implements IVoiceRecognizer {
   }
 
   public async stopListening(): Promise<void> {
-    if (this.recognition && this.active) {
+    this.active = false;
+    if (this.silenceTimer) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+    }
+    this.lastPartialTranscript = '';
+
+    if (this.recognition) {
       try {
         this.recognition.stop();
       } catch (err) {
         logger.warn('WebSpeechSTT', 'Recognition already stopped or inactive', err);
       }
     }
-    this.active = false;
+
+    if (this.activeStream) {
+      this.activeStream.getTracks().forEach((track) => track.stop());
+      this.activeStream = null;
+    }
+
     this.setState('idle');
   }
 

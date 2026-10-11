@@ -7,36 +7,34 @@ import {
   SUPPORTED_LANGUAGES,
   TaskRecord,
   BrowserAction,
+  ActionResult,
   ApprovalMode,
   AssistantState,
   PointerPosition,
   GestureType,
+  ConversationMessage,
 } from '../shared/types';
 import { HandTracker } from '../tracking/hand/HandTracker';
 import { HAND_CONNECTIONS } from '../tracking/hand/landmarkConnections';
 import { actionForHandGesture } from '../tracking/hand/gestureActions';
 import type { CalibrationState } from '../tracking/hand/calibration/calibrationEngine';
 import { HeadTracker } from '../tracking/head/headTracker';
-import { MockHeadTracker } from '../tracking/head/mockHeadTracker';
 import { defaultMockAiClient } from '../ai/mockAiClient';
 import { defaultBackendAiClient } from '../ai/providers/backendAiClient';
 import { defaultMockTaskMemoryStore } from '../memory/mockTaskMemoryStore';
 import { defaultChromeStorageTaskMemoryStore } from '../memory/chromeStorageMemoryStore';
 import { defaultChromeActionExecutor } from '../browser/chromeActionExecutor';
 import { defaultActionPolicy } from '../shared/safety/action-policy';
-import { WebSpeechRecognizer } from '../voice/webSpeechRecognizer';
 import { LiveKitVoiceClient, VoicePipeline } from '../voice';
+import { WakeWordListener, parseWakeWord } from '../voice/wakeWordListener';
 import { ResumableTaskManager } from '../memory/resumableTaskManager';
 import type { PageContext } from '../ai/types';
 
-// The real tracker owns the camera in hand mode.
+// The real trackers own camera and detection in hand and head modes.
 const handTracker = new HandTracker();
-// In browser extension environment use HeadTracker; in unit tests fall back to MockHeadTracker
-const headTracker = (typeof window !== 'undefined' && window.location?.protocol === 'chrome-extension:')
-  ? new HeadTracker()
-  : new MockHeadTracker();
-const voiceRecognizer = new WebSpeechRecognizer();
+const headTracker = new HeadTracker();
 const voicePipeline = new VoicePipeline();
+const wakeWordListener = new WakeWordListener();
 const livekitVoiceClient = new LiveKitVoiceClient();
 const resumableTaskManager = new ResumableTaskManager(defaultChromeStorageTaskMemoryStore);
 
@@ -97,10 +95,11 @@ export const Sidepanel: React.FC = () => {
   const [viewedTaskId, setViewedTaskId] = useState<string | null>(null);
 
   // Tracking
-  const [mode, setMode] = useState<TrackingMode>('hand');
+  const [mode, setMode] = useState<TrackingMode>('head');
   const [trackingStatus, setTrackingStatus] = useState<TrackingStatus>({
-    mode: 'hand', state: 'idle', confidence: 0, message: 'Standby',
+    mode: 'head', state: 'idle', confidence: 0, message: 'Standby',
   });
+  const [headFeedback, setHeadFeedback] = useState({ yaw: 0, pitch: 0, hasFace: false, gesture: 'None' });
 
   // Camera State
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -115,16 +114,31 @@ export const Sidepanel: React.FC = () => {
   const calibrationPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [showGestureGuide, setShowGestureGuide] = useState(false);
+  const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null);
+  const [isCapturingScreenshot, setIsCapturingScreenshot] = useState(false);
 
   // Settings
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask');
   const [interfaceLanguage, setInterfaceLanguage] = useState<SupportedLanguage>('en');
   const [voiceLanguage, setVoiceLanguage] = useState<SupportedLanguage>('en');
-  const [sensitivity, setSensitivity] = useState<number>(1.0);
+  const [sensitivity, setSensitivity] = useState<number>(0.85);
+
+  useEffect(() => {
+    headTracker.setSensitivity(sensitivity);
+  }, [sensitivity]);
+
+  useEffect(() => {
+    voicePipeline.setLanguage(voiceLanguage);
+    livekitVoiceClient.setLanguage(voiceLanguage);
+  }, [voiceLanguage]);
 
   // Voice State
   const [voiceState, setVoiceState] = useState<'idle' | 'requesting' | 'listening' | 'processing' | 'recognized' | 'denied' | 'unsupported' | 'error'>('idle');
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [wakeWordEnabled, setWakeWordEnabled] = useState<boolean>(false);
+  const latestVoiceTranscriptRef = useRef<string>('');
+  const handleSendMessageRef = useRef<(text?: string) => Promise<void>>(() => Promise.resolve());
+  const toggleListenRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
   // Assistant & Chat
   const [assistantState, setAssistantState] = useState<AssistantState>('idle');
@@ -162,25 +176,45 @@ export const Sidepanel: React.FC = () => {
       if (isMounted) setTasks(taskList);
     });
 
-    const unbindResult = voiceRecognizer.onResult((res) => {
+    const unbindTranscript = voicePipeline.onTranscript((res) => {
       if (!isMounted) return;
-      setInputText(res.transcript);
-      if (res.isFinal && res.transcript.trim()) {
+      const parsed = parseWakeWord(res.transcript);
+      const textToUse = parsed.matched && parsed.command ? parsed.command : res.transcript;
+
+      latestVoiceTranscriptRef.current = textToUse;
+      setInputText(textToUse);
+      if (res.isFinal && textToUse.trim()) {
+        const text = textToUse.trim();
+        latestVoiceTranscriptRef.current = '';
         setVoiceState('recognized');
-        void handleSendMessage(res.transcript.trim());
+        void handleSendMessageRef.current(text);
       }
     });
-    const unbindError = voiceRecognizer.onError((err) => {
+
+    const unbindState = voicePipeline.onStateChange((state) => {
       if (!isMounted) return;
-      if (err === 'not-allowed') setVoiceState('denied');
-      else {
+      if (state === 'listening') {
+        setVoiceState('listening');
+      } else if (state === 'idle') {
+        setVoiceState((prev) => (prev === 'listening' ? 'idle' : prev));
+      } else if (state === 'error') {
+        setVoiceState('error');
+      }
+    });
+
+    const unbindError = voicePipeline.onError((err) => {
+      if (!isMounted) return;
+      const isDenied =
+        err?.includes('not-allowed') ||
+        err?.includes('denied') ||
+        err?.includes('Permission');
+      if (isDenied) {
+        setVoiceState('denied');
+        setVoiceError('Microphone permission required. Grant access to use voice.');
+      } else {
         setVoiceState('error');
         setVoiceError(err);
       }
-    });
-    const unbindEnd = voiceRecognizer.onEnd(() => {
-      if (!isMounted) return;
-      setVoiceState(prev => (prev === 'listening' ? 'idle' : prev));
     });
 
     // Check if opened as mic permission tab
@@ -197,11 +231,49 @@ export const Sidepanel: React.FC = () => {
 
     return () => {
       isMounted = false;
-      unbindResult();
+      unbindTranscript();
+      unbindState();
       unbindError();
-      unbindEnd();
+      void voicePipeline.stopListening().catch(() => {});
     };
   }, []);
+
+  // Wake Word ("Hey Mac") Activation Lifecycle
+  useEffect(() => {
+    if (!wakeWordEnabled) {
+      wakeWordListener.stop();
+      return;
+    }
+
+    const unbind = wakeWordListener.onWake(async (event) => {
+      setCurrentActionDescription(`🎙️ "Hey Mac" heard!`);
+
+      if (event.command) {
+        // Direct execution of command in one breath! e.g., "Hey Mac scroll down"
+        setInputText(event.command);
+        setCurrentActionDescription(`🎙️ "Hey Mac": ${event.command}`);
+        void handleSendMessageRef.current(event.command);
+      } else {
+        // Wake-only utterance, open conversational listening
+        void toggleListenRef.current();
+      }
+    });
+
+    wakeWordListener.start();
+
+    return () => {
+      unbind();
+      wakeWordListener.stop();
+    };
+  }, [wakeWordEnabled]);
+
+  useEffect(() => {
+    if (voiceState === 'listening' || isSpeaking || assistantState === 'thinking') {
+      wakeWordListener.pause();
+    } else if (wakeWordEnabled) {
+      wakeWordListener.resume();
+    }
+  }, [voiceState, isSpeaking, assistantState, wakeWordEnabled]);
 
   // Raw MediaPipe results drive the existing preview canvas. The preview and
   // canvas are both mirrored by CSS, so raw normalized landmarks use the same
@@ -290,11 +362,14 @@ export const Sidepanel: React.FC = () => {
     return () => { unbindPointer(); };
   }, [mode, showSkeleton, cameraState]);
 
-  // Adjust canvas size to match video
+  // Adjust canvas size to match video and bind preview
   useEffect(() => {
     if (cameraState === 'live' && videoRef.current && canvasRef.current) {
       const video = videoRef.current;
       const canvas = canvasRef.current;
+      if (mode === 'head') {
+        headTracker.setPreviewElements(video, canvas);
+      }
       const updateSize = () => {
         canvas.width = video.clientWidth;
         canvas.height = video.clientHeight;
@@ -303,7 +378,22 @@ export const Sidepanel: React.FC = () => {
       window.addEventListener('resize', updateSize);
       return () => { clearTimeout(timer); window.removeEventListener('resize', updateSize); };
     }
-  }, [cameraState]);
+  }, [cameraState, mode]);
+
+  // Head tracking diagnostics polling
+  useEffect(() => {
+    if (mode !== 'head' || trackingStatus.state !== 'active') return;
+    const interval = setInterval(() => {
+      setHeadFeedback({
+        yaw: headTracker.pose.relYaw,
+        pitch: headTracker.pose.relPitch,
+        hasFace: headTracker.pose.hasMatrix,
+        gesture: headTracker.latestGesture,
+      });
+      setTrackingStatus(headTracker.getStatus());
+    }, 150);
+    return () => clearInterval(interval);
+  }, [mode, trackingStatus.state]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -391,6 +481,15 @@ export const Sidepanel: React.FC = () => {
     setCameraState('live');
   };
 
+  const attachHeadTrackerPreview = () => {
+    headTracker.setPreviewElements(videoRef.current, canvasRef.current);
+    const trackerVideo = headTracker.getVideoElement();
+    if (trackerVideo?.srcObject && videoRef.current) {
+      videoRef.current.srcObject = trackerVideo.srcObject;
+    }
+    setCameraState('live');
+  };
+
   const clearCalibrationPolling = () => {
     if (calibrationPollRef.current) {
       clearInterval(calibrationPollRef.current);
@@ -399,7 +498,20 @@ export const Sidepanel: React.FC = () => {
   };
 
   const handleCalibrate = async () => {
-    if (mode !== 'hand' || calibrationInFlightRef.current || trackingStatus.state !== 'active') return;
+    if (calibrationInFlightRef.current || trackingStatus.state !== 'active') return;
+    if (mode === 'head') {
+      try {
+        setCurrentActionDescription('Head calibration: Keep your head neutral and look at the camera...');
+        await headTracker.calibrate();
+        setTrackingStatus(headTracker.getStatus());
+        setCurrentActionDescription('Head calibration complete.');
+      } catch (e: any) {
+        setCurrentActionDescription(`Head calibration error: ${e?.message}`);
+      }
+      return;
+    }
+
+    if (mode !== 'hand') return;
     calibrationInFlightRef.current = true;
     setCalibrationState(handTracker.getCalibrationState());
     setCurrentActionDescription('Calibration started. Follow the instruction below.');
@@ -426,16 +538,16 @@ export const Sidepanel: React.FC = () => {
   // Tracking Handlers
   const handleStart = async () => {
     try {
+      setCameraState('requesting');
       if (mode === 'hand') {
-        setCameraState('requesting');
         await handTracker.start('hand');
         attachHandTrackerPreview();
         setTrackingStatus(handTracker.getStatus());
         return;
       }
 
-      await startCamera();
       await headTracker.start('head');
+      attachHeadTrackerPreview();
       setTrackingStatus(headTracker.getStatus());
     } catch (err) {
       console.error('[Tracking] Failed to start tracker:', err);
@@ -466,8 +578,6 @@ export const Sidepanel: React.FC = () => {
     calibrationInFlightRef.current = false;
     setCalibrationState(handTracker.getCalibrationState());
     setHandFeedback({ hands: 0, pointing: false, pointerActive: false, cursorDelivered: false, frames: 0, inferenceMs: 0 });
-    // Stops the head-mode stream and clears the preview. In hand mode the
-    // tracker has already released its own stream above.
     stopCamera();
     setMode(newMode);
 
@@ -477,14 +587,14 @@ export const Sidepanel: React.FC = () => {
     }
 
     try {
+      setCameraState('requesting');
       if (newMode === 'hand') {
-        setCameraState('requesting');
         await handTracker.start('hand');
         attachHandTrackerPreview();
         setTrackingStatus(handTracker.getStatus());
       } else {
-        await startCamera();
         await headTracker.start('head');
+        attachHeadTrackerPreview();
         setTrackingStatus(headTracker.getStatus());
       }
     } catch (err) {
@@ -496,13 +606,13 @@ export const Sidepanel: React.FC = () => {
   };
 
   // Actions & AI
-  const executeActionSafely = async (action: BrowserAction, taskId: string) => {
+  const executeActionSafely = async (action: BrowserAction, taskId: string): Promise<ActionResult> => {
     const decision = defaultActionPolicy.evaluate(action, approvalMode);
     if (decision.requiresApproval) {
       setAssistantState('awaiting_approval');
       setPendingApproval(action);
       setCurrentActionDescription(`${t('actionRequired', interfaceLanguage)}: ${action.type}`);
-      return;
+      return { success: false, message: 'Action requires explicit approval' };
     }
 
     setAssistantState('executing');
@@ -515,6 +625,7 @@ export const Sidepanel: React.FC = () => {
     setTasks(updatedTasks);
     setAssistantState(result.success ? 'success' : 'error');
     setCurrentActionDescription(result.message);
+    return result;
   };
 
   const handleCancelTask = async () => {
@@ -591,6 +702,117 @@ export const Sidepanel: React.FC = () => {
     }
   };
 
+  const triggerPageScroll = async (direction: 'up' | 'down', amount = 450) => {
+    try {
+      let tabId: number | undefined;
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      tabId = tabs[0]?.id;
+
+      if (!tabId && chrome.windows) {
+        const win = await chrome.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null);
+        if (win?.id) {
+          const focusedTabs = await chrome.tabs.query({ active: true, windowId: win.id });
+          tabId = focusedTabs[0]?.id;
+        }
+      }
+
+      if (tabId === undefined) return;
+
+      chrome.tabs.sendMessage(tabId, {
+        type: 'EXECUTE_BROWSER_ACTION',
+        payload: {
+          action: {
+            type: 'scroll_page',
+            direction,
+            amount,
+          }
+        },
+        action: {
+          type: 'scroll_page',
+          direction,
+          amount,
+        }
+      }, (res) => {
+        if (chrome.runtime.lastError || !res?.success) {
+          if (chrome.scripting && tabId !== undefined) {
+            chrome.scripting.executeScript({
+              target: { tabId },
+              func: (dir: 'up' | 'down', amt: number) => {
+                window.scrollBy({
+                  top: dir === 'down' ? amt : -amt,
+                  behavior: 'smooth',
+                });
+              },
+              args: [direction, amount],
+            }).catch(() => {});
+          }
+        }
+      });
+    } catch (err) {
+      console.warn('[PageScroll] Error scrolling active tab:', err);
+    }
+  };
+
+  const downloadScreenshot = (dataUrl: string) => {
+    const timestampStr = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename = `handsfree-screenshot-${timestampStr}.png`;
+    if (typeof chrome !== 'undefined' && chrome.downloads?.download) {
+      chrome.downloads.download({
+        url: dataUrl,
+        filename,
+        saveAs: false,
+      });
+    } else {
+      const a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+  };
+
+  const triggerCaptureScreenshot = async () => {
+    if (isCapturingScreenshot) return;
+    setIsCapturingScreenshot(true);
+    setCurrentActionDescription('📸 Camera Frame gesture! Taking screenshot...');
+
+    try {
+      // 1. Tell active tab to flash screen and play camera shutter sound
+      if (typeof chrome !== 'undefined' && chrome.tabs?.query) {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          const activeTabId = tabs[0]?.id;
+          if (activeTabId) {
+            chrome.tabs.sendMessage(activeTabId, { type: 'FLASH_SCREEN' }).catch(() => {});
+          }
+        });
+      }
+
+      // 2. Request screenshot via background service worker
+      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        chrome.runtime.sendMessage({ type: 'CAPTURE_SCREENSHOT', payload: {} }, (response) => {
+          setIsCapturingScreenshot(false);
+          if (response?.success && response.dataUrl) {
+            setScreenshotPreview(response.dataUrl);
+            downloadScreenshot(response.dataUrl);
+            setCurrentActionDescription('📸 Screenshot captured & downloaded!');
+          } else if (chrome.tabs?.captureVisibleTab) {
+            chrome.tabs.captureVisibleTab(null as any, { format: 'png' }, (dataUrl) => {
+              if (dataUrl) {
+                setScreenshotPreview(dataUrl);
+                downloadScreenshot(dataUrl);
+                setCurrentActionDescription('📸 Screenshot captured & downloaded!');
+              }
+            });
+          }
+        });
+      }
+    } catch (err) {
+      console.warn('[Screenshot] Error taking screenshot:', err);
+      setIsCapturingScreenshot(false);
+    }
+  };
+
   const handleHeadGesture = async (gesture: GestureType, pos?: PointerPosition) => {
     setLastGesture(gesture);
 
@@ -648,19 +870,10 @@ export const Sidepanel: React.FC = () => {
       return;
     }
 
-    if (gesture === 'scroll_up') {
-      const task = await defaultMockTaskMemoryStore.createTask('Head gesture: Scroll Up', voiceLanguage);
-      await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
-      setActiveTaskId(task.id);
-      await executeActionSafely({ type: 'scroll_page', direction: 'up', amount: 500 }, task.id);
-      return;
-    }
-
-    if (gesture === 'scroll_down') {
-      const task = await defaultMockTaskMemoryStore.createTask('Head gesture: Scroll Down', voiceLanguage);
-      await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
-      setActiveTaskId(task.id);
-      await executeActionSafely({ type: 'scroll_page', direction: 'down', amount: 500 }, task.id);
+    if (gesture === 'scroll_up' || gesture === 'scroll_down') {
+      const direction = gesture === 'scroll_up' ? 'up' : 'down';
+      await triggerPageScroll(direction);
+      setCurrentActionDescription(`Head gesture: Scrolled ${direction}`);
       return;
     }
 
@@ -713,6 +926,18 @@ export const Sidepanel: React.FC = () => {
       return;
     }
 
+    if (gesture === 'scroll_up' || gesture === 'scroll_down') {
+      const direction = gesture === 'scroll_up' ? 'up' : 'down';
+      await triggerPageScroll(direction);
+      setCurrentActionDescription(`Scrolled ${direction}`);
+      return;
+    }
+
+    if (gesture === 'screenshot') {
+      await triggerCaptureScreenshot();
+      return;
+    }
+
     const action = actionForHandGesture(gesture);
     if (!action) {
       setCurrentActionDescription(`Gesture recognized: ${gesture}`);
@@ -749,30 +974,53 @@ export const Sidepanel: React.FC = () => {
 
   const speakText = (text: string) => {
     setIsSpeaking(true);
-    voicePipeline.speak(text, voiceLanguage).catch(() => {
-      if (!window.speechSynthesis) {
+    voicePipeline.speak(text, voiceLanguage)
+      .then(() => {
         setIsSpeaking(false);
-        return;
-      }
-      stopSpeaking();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = voiceLanguage;
-      utterance.onend = () => setIsSpeaking(false);
-      utterance.onerror = () => setIsSpeaking(false);
-      setIsSpeaking(true);
-      window.speechSynthesis.speak(utterance);
-    });
+      })
+      .catch(() => {
+        if (!window.speechSynthesis) {
+          setIsSpeaking(false);
+          return;
+        }
+        stopSpeaking();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = voiceLanguage;
+        utterance.onend = () => setIsSpeaking(false);
+        utterance.onerror = () => setIsSpeaking(false);
+        setIsSpeaking(true);
+        window.speechSynthesis.speak(utterance);
+      });
   };
 
   const handleReadPage = async () => {
     try {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tabs[0]?.id) throw new Error('No active tab found');
-      const response = await chrome.tabs.sendMessage(tabs[0].id, { 
-        type: 'EXECUTE_BROWSER_ACTION', 
-        payload: { action: { type: 'read_page' } },
-        action: { type: 'read_page' } 
-      });
+      const tabId = tabs[0].id;
+      let response: any;
+      try {
+        response = await chrome.tabs.sendMessage(tabId, { 
+          type: 'EXECUTE_BROWSER_ACTION', 
+          payload: { action: { type: 'read_page' } },
+          action: { type: 'read_page' } 
+        });
+      } catch (sendErr) {
+        // Inject content.js on demand if tab was open before extension reloaded
+        if (chrome.scripting?.executeScript) {
+          await chrome.scripting.executeScript({
+            target: { tabId, allFrames: false },
+            files: ['content.js'],
+          });
+          response = await chrome.tabs.sendMessage(tabId, { 
+            type: 'EXECUTE_BROWSER_ACTION', 
+            payload: { action: { type: 'read_page' } },
+            action: { type: 'read_page' } 
+          });
+        } else {
+          throw sendErr;
+        }
+      }
       const pageText = response?.data?.text || response?.data?.content;
       if (response && response.success && pageText) {
         setConversation(prev => [...prev, { role: 'user', text: 'Read this page' }]);
@@ -792,8 +1040,8 @@ export const Sidepanel: React.FC = () => {
     const textToProcess = overrideText || inputText;
     if (!textToProcess.trim() || assistantState === 'thinking') return;
     
-    if (voiceState === 'listening') {
-      await voiceRecognizer.stopListening();
+    if (voiceState === 'listening' || voicePipeline.getState() === 'listening') {
+      await voicePipeline.stopListening().catch(() => {});
     }
     setVoiceState('processing');
     setAssistantState('thinking');
@@ -809,7 +1057,14 @@ export const Sidepanel: React.FC = () => {
       const pageContext = await getActivePageContext();
 
       try {
-        const backendRes = await defaultBackendAiClient.chat(textToProcess, voiceLanguage, undefined, pageContext);
+        const conversationHistory: ConversationMessage[] = conversation.map((c, idx) => ({
+          id: `msg_${idx}`,
+          role: c.role,
+          content: c.text,
+          timestamp: Date.now(),
+          language: voiceLanguage,
+        }));
+        const backendRes = await defaultBackendAiClient.chat(textToProcess, voiceLanguage, conversationHistory, pageContext);
         replyContent = backendRes.reply;
         plannedActions = backendRes.suggestedActions || [];
       } catch {
@@ -829,7 +1084,18 @@ export const Sidepanel: React.FC = () => {
       setTasks(updatedTasks);
 
       if (plannedActions.length > 0) {
-        await executeActionSafely(plannedActions[0], newTask.id);
+        for (let i = 0; i < plannedActions.length; i++) {
+          const action = plannedActions[i];
+          const result = await executeActionSafely(action, newTask.id);
+          if (!result || !result.success) {
+            break;
+          }
+          if (action.type === 'open_url') {
+            // Give heavy apps (Gmail, Google Docs) adequate time to mount before executing the next action
+            const isHeavyApp = /mail\.google\.com|docs\.(new|google\.com)/i.test(action.url || '');
+            await new Promise((resolve) => setTimeout(resolve, isHeavyApp ? 5000 : 3500));
+          }
+        }
       } else {
         setAssistantState('success');
         setCurrentActionDescription('...');
@@ -862,54 +1128,55 @@ export const Sidepanel: React.FC = () => {
     setActiveTaskId(null);
   };
 
+  handleSendMessageRef.current = handleSendMessage;
+
   const toggleListen = async () => {
-    if (voiceState === 'listening') {
-      await voiceRecognizer.stopListening().catch(() => {});
+    if (voiceState === 'listening' || voicePipeline.getState() === 'listening') {
       await voicePipeline.stopListening().catch(() => {});
       await livekitVoiceClient.disconnect().catch(() => {});
-      setVoiceState('idle');
+      const pending = latestVoiceTranscriptRef.current.trim();
+      if (pending) {
+        latestVoiceTranscriptRef.current = '';
+        setVoiceState('recognized');
+        void handleSendMessage(pending);
+      } else {
+        setVoiceState('idle');
+      }
       return;
     }
+
     try {
       setVoiceState('requesting');
       setVoiceError(null);
       setInputText('');
 
-      // Test microphone access in browser
-      if (navigator.mediaDevices?.getUserMedia) {
-        try {
-          const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          micStream.getTracks().forEach(t => t.stop());
-        } catch (permErr: any) {
-          console.warn('[Voice] Mic getUserMedia error:', permErr);
-          if (permErr.name === 'NotAllowedError' || permErr.name === 'PermissionDeniedError') {
-            setVoiceState('denied');
-            setVoiceError('Microphone permission denied. Grant access to use voice.');
-            if (typeof chrome !== 'undefined' && chrome.tabs?.create) {
-              chrome.tabs.create({ url: chrome.runtime.getURL('src/sidepanel/index.html?mic=request') });
-            }
-            return;
-          }
-        }
-      }
-
-      await voiceRecognizer.startListening(voiceLanguage);
+      voicePipeline.setLanguage(voiceLanguage);
+      await voicePipeline.startListening();
       setVoiceState('listening');
     } catch (err: any) {
-      if (err.message?.includes('not supported')) {
-        setVoiceState('unsupported');
-      } else if (err.message?.includes('not-allowed') || err.name === 'NotAllowedError') {
+      const isDenied =
+        err?.name === 'NotAllowedError' ||
+        err?.name === 'PermissionDeniedError' ||
+        err?.message?.includes('not-allowed') ||
+        err?.message?.includes('denied');
+
+      if (isDenied) {
         setVoiceState('denied');
-        setVoiceError('Microphone permission blocked. Grant access to use voice.');
+        setVoiceError('Microphone permission blocked. Click Grant Access to allow.');
         if (typeof chrome !== 'undefined' && chrome.tabs?.create) {
           chrome.tabs.create({ url: chrome.runtime.getURL('src/sidepanel/index.html?mic=request') });
         }
+      } else if (err?.message?.includes('not supported')) {
+        setVoiceState('unsupported');
+        setVoiceError('Speech recognition is not supported in this environment.');
       } else {
         setVoiceState('error');
-        setVoiceError(err.message || 'Voice recognition failed');
+        setVoiceError(err?.message || 'Voice recognition failed to start.');
       }
     }
   };
+
+  toggleListenRef.current = toggleListen;
 
   return (
     // Background matching the warm cream reference #f6f4ee
@@ -1194,10 +1461,10 @@ export const Sidepanel: React.FC = () => {
                 </div>
               ) : (
                 <div className="flex flex-wrap justify-between items-center w-full px-1 text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary gap-x-1.5 gap-y-1">
-                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Look:</span><span>Move</span></div>
-                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Nod:</span><span>Click</span></div>
-                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Shake:</span><span>Cancel</span></div>
-                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Dwell:</span><span>Hover/Click</span></div>
+                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Blink:</span><span>Click</span></div>
+                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Left Nod:</span><span>Left Tab</span></div>
+                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Right Nod:</span><span>Right Tab</span></div>
+                  <div className="flex items-center space-x-1"><span className="font-bold text-hf-text-primary dark:text-hf-dark-text-primary">Shake:</span><span>Dismiss</span></div>
                 </div>
               )}
             </div>
@@ -1246,6 +1513,22 @@ export const Sidepanel: React.FC = () => {
                       <button className="absolute top-3 right-3 w-[26px] h-[26px] rounded-full bg-black/60 backdrop-blur-md text-white flex items-center justify-center hover:bg-black/80 transition">
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
                       </button>
+                      {mode === 'head' && (
+                        <div className="absolute bottom-3 left-3 right-3 flex justify-between items-end pointer-events-auto">
+                          <div className="max-w-[calc(100%-85px)] bg-black/60 backdrop-blur-md text-white px-2.5 py-1.5 rounded-lg text-[10px] leading-relaxed shadow-sm">
+                            <div className="font-semibold">{headFeedback.hasFace ? '👤 Head & Face Mesh Active' : 'Looking for face...'}</div>
+                            <div className="text-white/80">Yaw: {headFeedback.yaw >= 0 ? `+${headFeedback.yaw.toFixed(1)}` : headFeedback.yaw.toFixed(1)}° · Pitch: {headFeedback.pitch >= 0 ? `+${headFeedback.pitch.toFixed(1)}` : headFeedback.pitch.toFixed(1)}°</div>
+                            <div className="text-white/60">Gesture: {headFeedback.gesture || lastGesture || 'None'}</div>
+                          </div>
+                          <button
+                            onClick={handleCalibrate}
+                            disabled={trackingStatus.state !== 'active'}
+                            className="shrink-0 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-gradient-to-br from-[#238F83] to-[#1A6B62] text-white shadow-md disabled:opacity-50 disabled:cursor-not-allowed hover:scale-105 transition active:scale-95"
+                          >
+                            Calibrate
+                          </button>
+                        </div>
+                      )}
                       {mode === 'hand' && (
                         <div className="absolute bottom-3 left-3 right-3 flex justify-between items-end">
                           <div className="max-w-[calc(100%-85px)] bg-black/60 backdrop-blur-md text-white px-2.5 py-1.5 rounded-lg text-[10px] leading-relaxed shadow-sm">
@@ -1452,7 +1735,20 @@ export const Sidepanel: React.FC = () => {
                  </div>
                  <h3 className="font-bold text-[15px] tracking-tight text-hf-text-primary dark:text-hf-dark-text-primary dark:text-white">{t('voiceCommand', interfaceLanguage)}</h3>
                </div>
-               <div className="flex items-center space-x-1">
+               <div className="flex items-center space-x-2">
+                 <button
+                   id="hey-mac-header-toggle"
+                   onClick={() => setWakeWordEnabled(!wakeWordEnabled)}
+                   className={`flex items-center space-x-1.5 text-[11px] font-semibold transition px-2.5 py-1 rounded-full border shadow-sm ${
+                     wakeWordEnabled
+                       ? 'bg-emerald-600 text-white border-emerald-700 shadow-emerald-500/20 hover:bg-emerald-700'
+                       : 'bg-black/5 dark:bg-white/10 text-gray-500 dark:text-gray-400 border-black/10 dark:border-white/10 hover:bg-black/10'
+                   }`}
+                   title="Toggle hands-free 'Hey Mac' wake word listening"
+                 >
+                   <span className={`w-2 h-2 rounded-full ${wakeWordEnabled ? 'bg-white animate-pulse' : 'bg-gray-400'}`}></span>
+                   <span>Hey Mac: {wakeWordEnabled ? 'ON' : 'OFF'}</span>
+                 </button>
                  <select 
                     value={voiceLanguage} 
                     onChange={(e) => setVoiceLanguage(e.target.value as SupportedLanguage)}
@@ -1503,10 +1799,23 @@ export const Sidepanel: React.FC = () => {
                </button>
              </div>
              
-             <div className="pt-1 flex justify-center">
-                <button onClick={handleReadPage} className="flex items-center space-x-1.5 text-[12px] font-semibold text-hf-teal hover:text-hf-teal/80 transition bg-hf-teal/10 px-3 py-1.5 rounded-lg">
+             <div className="pt-1 flex items-center justify-between px-0.5">
+                <button onClick={handleReadPage} className="flex items-center space-x-1.5 text-[11px] font-semibold text-hf-teal hover:text-hf-teal/80 transition bg-hf-teal/10 px-2.5 py-1.5 rounded-xl">
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"></path></svg>
-                  <span>Read Page Aloud</span>
+                  <span>Read Page</span>
+                </button>
+
+                <button
+                  onClick={() => setWakeWordEnabled(!wakeWordEnabled)}
+                  className={`flex items-center space-x-1.5 text-[11px] font-semibold transition px-2.5 py-1.5 rounded-xl border ${
+                    wakeWordEnabled
+                      ? 'bg-emerald-500/10 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                      : 'bg-black/[0.03] dark:bg-white/5 text-gray-400 border-black/10 dark:border-white/10'
+                  }`}
+                  title="Toggle hands-free 'Hey Mac' wake phrase"
+                >
+                  <span className={`w-2 h-2 rounded-full ${wakeWordEnabled ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'}`}></span>
+                  <span>&quot;Hey Mac&quot; {wakeWordEnabled ? 'Listening' : 'Off'}</span>
                 </button>
              </div>
 
@@ -1633,6 +1942,14 @@ export const Sidepanel: React.FC = () => {
                     </div>
                     <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-1">Fist: Undo · Palm Open: Redo / Reset</p>
                   </div>
+
+                  <div className="p-2.5 rounded-xl bg-gradient-to-r from-purple-500/10 to-pink-500/10 border border-purple-500/20 flex flex-col justify-between">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-hf-text-primary dark:text-white">Camera Frame 📸 (Both Hands &quot;L&quot;)</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300 font-semibold">Easter Egg</span>
+                    </div>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-1">Hold both hands up in an &quot;L&quot; framing shape to snap &amp; download a screenshot with shutter flash!</p>
+                  </div>
                 </div>
               </div>
 
@@ -1645,20 +1962,20 @@ export const Sidepanel: React.FC = () => {
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10">
-                    <span className="font-bold text-hf-text-primary dark:text-white">Look Around:</span>
-                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-0.5">Smooth head tilt moves cursor anywhere on screen</p>
+                    <span className="font-bold text-hf-text-primary dark:text-white">Double Blink:</span>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-0.5">Two rapid blinks triggers click with cursor freeze</p>
                   </div>
                   <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10">
-                    <span className="font-bold text-hf-text-primary dark:text-white">Nod:</span>
-                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-0.5">Quick nod down triggers primary click</p>
+                    <span className="font-bold text-hf-text-primary dark:text-white">Left Nod:</span>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-0.5">Nod down while angled left switches to left (previous) tab</p>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10">
+                    <span className="font-bold text-hf-text-primary dark:text-white">Right Nod:</span>
+                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-0.5">Nod down while angled right switches to right (next) tab</p>
                   </div>
                   <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10">
                     <span className="font-bold text-hf-text-primary dark:text-white">Shake:</span>
                     <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-0.5">Quick head shake cancels task or dismisses modal</p>
-                  </div>
-                  <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10">
-                    <span className="font-bold text-hf-text-primary dark:text-white">Dwell:</span>
-                    <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary mt-0.5">Hovering pointer over any button activates click</p>
                   </div>
                 </div>
               </div>
@@ -1671,6 +1988,7 @@ export const Sidepanel: React.FC = () => {
                 </div>
 
                 <div className="p-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-hf-border dark:border-white/10 space-y-1.5 text-[11px]">
+                  <div className="flex items-center justify-between"><span className="font-semibold text-emerald-600 dark:text-emerald-400">&quot;Hey Mac [command]&quot;</span><span className="text-hf-text-secondary dark:text-hf-dark-text-secondary">Hands-free wake &amp; control</span></div>
                   <div className="flex items-center justify-between"><span className="font-semibold text-hf-text-primary dark:text-white">&quot;Scroll down / Scroll up&quot;</span><span className="text-hf-text-secondary dark:text-hf-dark-text-secondary">Scrolls the page</span></div>
                   <div className="flex items-center justify-between"><span className="font-semibold text-hf-text-primary dark:text-white">&quot;Click [button name or element]&quot;</span><span className="text-hf-text-secondary dark:text-hf-dark-text-secondary">AI clicks targeted item</span></div>
                   <div className="flex items-center justify-between"><span className="font-semibold text-hf-text-primary dark:text-white">&quot;Read this page&quot;</span><span className="text-hf-text-secondary dark:text-hf-dark-text-secondary">Reads web page text aloud</span></div>
@@ -1687,6 +2005,39 @@ export const Sidepanel: React.FC = () => {
                 className="px-4 py-2 bg-hf-teal text-white rounded-xl text-[12px] font-bold hover:bg-hf-teal/90 transition shadow-sm"
               >
                 Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Screenshot Toast Card */}
+      {screenshotPreview && (
+        <div className="fixed bottom-4 left-4 right-4 z-50 animate-in fade-in slide-in-from-bottom-3 duration-300">
+          <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-purple-500/30 rounded-2xl p-3 shadow-2xl flex items-center space-x-3">
+            <div className="relative w-16 h-12 rounded-lg overflow-hidden border border-black/10 dark:border-white/10 shrink-0 bg-black/5">
+              <img src={screenshotPreview} alt="Screenshot" className="w-full h-full object-cover" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center space-x-1.5">
+                <span className="text-[12px] font-bold text-hf-text-primary dark:text-white truncate">Screenshot Captured!</span>
+                <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-300 font-semibold">Easter Egg</span>
+              </div>
+              <p className="text-[11px] text-hf-text-secondary dark:text-hf-dark-text-secondary truncate">Saved to Downloads folder</p>
+            </div>
+            <div className="flex items-center space-x-1.5 shrink-0">
+              <button
+                onClick={() => downloadScreenshot(screenshotPreview)}
+                className="px-2.5 py-1.5 bg-hf-teal text-white rounded-lg text-[11px] font-semibold hover:bg-hf-teal/90 transition shadow-sm"
+              >
+                Save
+              </button>
+              <button
+                onClick={() => setScreenshotPreview(null)}
+                className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition"
+                title="Dismiss"
+              >
+                ✕
               </button>
             </div>
           </div>
