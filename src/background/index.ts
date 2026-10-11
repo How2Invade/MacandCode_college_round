@@ -218,7 +218,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
                 .then(() => sendResponse({ success: true, message: `Opened URL: ${url}` }))
                 .catch((err: any) => sendResponse({ success: false, message: err.message || 'Failed to open tab' }));
               return true; // asynchronous sendResponse
-            } catch (e: any) {
+            } catch {
               sendResponse({ success: false, message: `Invalid URL: ${url}` });
               break;
             }

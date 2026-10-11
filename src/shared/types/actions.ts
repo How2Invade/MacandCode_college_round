@@ -1,3 +1,4 @@
+
 /**
  * Browser Actions and Execution Interfaces
  * Shared contract for Handsfree browser automation and action execution.
@@ -13,7 +14,9 @@ export type BrowserAction =
   | { type: "switch_tab"; direction: "next" | "previous" }
   | { type: "read_page" }
   | { type: "zoom_page"; direction: "in" | "out" }
-  | { type: "history_action"; command: "undo" | "redo" };
+  | { type: "history_action"; command: "undo" | "redo" }
+  | { type: "undo" }
+  | { type: "redo" };
 
 export type ApprovalMode = "ask" | "auto";
 

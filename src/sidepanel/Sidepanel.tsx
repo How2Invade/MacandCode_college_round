@@ -10,23 +10,46 @@ import {
   ApprovalMode,
   AssistantState,
   PointerPosition,
+  GestureType,
 } from '../shared/types';
 import { HandTracker } from '../tracking/hand/HandTracker';
 import { HAND_CONNECTIONS } from '../tracking/hand/landmarkConnections';
 import { actionForHandGesture } from '../tracking/hand/gestureActions';
 import type { CalibrationState } from '../tracking/hand/calibration/calibrationEngine';
+import { HeadTracker } from '../tracking/head/headTracker';
 import { MockHeadTracker } from '../tracking/head/mockHeadTracker';
 import { defaultMockAiClient } from '../ai/mockAiClient';
+import { defaultBackendAiClient } from '../ai/providers/backendAiClient';
 import { defaultMockTaskMemoryStore } from '../memory/mockTaskMemoryStore';
+import { defaultChromeStorageTaskMemoryStore } from '../memory/chromeStorageMemoryStore';
 import { defaultChromeActionExecutor } from '../browser/chromeActionExecutor';
 import { defaultActionPolicy } from '../shared/safety/action-policy';
 import { WebSpeechRecognizer } from '../voice/webSpeechRecognizer';
+import { LiveKitVoiceClient, VoicePipeline } from '../voice';
+import { ResumableTaskManager } from '../memory/resumableTaskManager';
+import type { PageContext } from '../ai/types';
 
-// The real tracker owns the camera in hand mode. MockHandTracker remains
-// available as an exported fallback, but is not used for the live session.
+// The real tracker owns the camera in hand mode.
 const handTracker = new HandTracker();
-const headTracker = new MockHeadTracker();
+// In browser extension environment use HeadTracker; in unit tests fall back to MockHeadTracker
+const headTracker = (typeof window !== 'undefined' && window.location?.protocol === 'chrome-extension:')
+  ? new HeadTracker()
+  : new MockHeadTracker();
 const voiceRecognizer = new WebSpeechRecognizer();
+const voicePipeline = new VoicePipeline();
+const livekitVoiceClient = new LiveKitVoiceClient();
+const resumableTaskManager = new ResumableTaskManager(defaultChromeStorageTaskMemoryStore);
+
+async function getActivePageContext(): Promise<PageContext | undefined> {
+  if (typeof chrome === 'undefined' || !chrome.tabs?.query) return undefined;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab) return undefined;
+    return { url: tab.url, title: tab.title };
+  } catch {
+    return undefined;
+  }
+}
 
 const INITIAL_CALIBRATION_STATE: CalibrationState = {
   phase: 'idle', progress: 0, instruction: 'Calibration not started.', elapsedMs: 0, remainingMs: 0,
@@ -134,15 +157,21 @@ export const Sidepanel: React.FC = () => {
 
   // Init Tasks & Voice Binding
   useEffect(() => {
-    defaultMockTaskMemoryStore.listTasks().then(setTasks);
+    let isMounted = true;
+    defaultMockTaskMemoryStore.listTasks().then((taskList) => {
+      if (isMounted) setTasks(taskList);
+    });
 
     const unbindResult = voiceRecognizer.onResult((res) => {
+      if (!isMounted) return;
       setInputText(res.transcript);
-      if (res.isFinal) {
+      if (res.isFinal && res.transcript.trim()) {
         setVoiceState('recognized');
+        void handleSendMessage(res.transcript.trim());
       }
     });
     const unbindError = voiceRecognizer.onError((err) => {
+      if (!isMounted) return;
       if (err === 'not-allowed') setVoiceState('denied');
       else {
         setVoiceState('error');
@@ -150,10 +179,28 @@ export const Sidepanel: React.FC = () => {
       }
     });
     const unbindEnd = voiceRecognizer.onEnd(() => {
+      if (!isMounted) return;
       setVoiceState(prev => (prev === 'listening' ? 'idle' : prev));
     });
 
-    return () => { unbindResult(); unbindError(); unbindEnd(); };
+    // Check if opened as mic permission tab
+    if (typeof window !== 'undefined' && window.location?.search?.includes('mic=request')) {
+      if (navigator.mediaDevices?.getUserMedia) {
+        navigator.mediaDevices.getUserMedia({ audio: true })
+          .then((s) => {
+            s.getTracks().forEach(t => t.stop());
+            setTimeout(() => { window.close(); }, 1200);
+          })
+          .catch((e) => console.warn('[Mic] Permission request denied:', e));
+      }
+    }
+
+    return () => {
+      isMounted = false;
+      unbindResult();
+      unbindError();
+      unbindEnd();
+    };
   }, []);
 
   // Raw MediaPipe results drive the existing preview canvas. The preview and
@@ -398,20 +445,6 @@ export const Sidepanel: React.FC = () => {
     }
   };
 
-  // @ts-ignore: preserved for underlying lifecycle logic
-  const handlePause = async () => {
-    const activeTracker = mode === 'hand' ? handTracker : headTracker;
-    await activeTracker.pause();
-    setTrackingStatus(activeTracker.getStatus());
-  };
-
-  // @ts-ignore: preserved for underlying lifecycle logic
-  const handleResume = async () => {
-    const activeTracker = mode === 'hand' ? handTracker : headTracker;
-    await activeTracker.resume();
-    setTrackingStatus(activeTracker.getStatus());
-  };
-
   const handleStop = async () => {
     clearCalibrationPolling();
     const activeTracker = mode === 'hand' ? handTracker : headTracker;
@@ -484,34 +517,16 @@ export const Sidepanel: React.FC = () => {
     setCurrentActionDescription(result.message);
   };
 
-  const handleHandGesture = async (gesture: Parameters<typeof actionForHandGesture>[0]) => {
-    setLastGesture(gesture);
-
-    if (gesture === 'shaka') {
-      toggleListen();
-      setCurrentActionDescription(`Gesture recognized: shaka (toggled voice)`);
-      return;
+  const handleCancelTask = async () => {
+    if (activeTaskId) {
+      await defaultMockTaskMemoryStore.updateTaskStatus(activeTaskId, 'cancelled');
+      const updatedTasks = await defaultMockTaskMemoryStore.listTasks();
+      setTasks(updatedTasks);
+      setActiveTaskId(null);
+      setAssistantState('idle');
+      setPendingApproval(null);
     }
-
-    const action = actionForHandGesture(gesture);
-    if (!action) {
-      setCurrentActionDescription(`Gesture recognized: ${gesture} (no approval-safe action mapped)`);
-      return;
-    }
-
-    const task = await defaultMockTaskMemoryStore.createTask(`Hand gesture: ${gesture}`, voiceLanguage);
-    await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
-    setActiveTaskId(task.id);
-    setTasks(await defaultMockTaskMemoryStore.listTasks());
-    await executeActionSafely(action, task.id);
   };
-
-  useEffect(() => {
-    const unbindGesture = handTracker.onTrackingEvent((event) => {
-      void handleHandGesture(event.gesture);
-    });
-    return unbindGesture;
-  }, [voiceLanguage, approvalMode]);
 
   const handleApproveAction = async () => {
     if (!pendingApproval || !activeTaskId) return;
@@ -550,24 +565,203 @@ export const Sidepanel: React.FC = () => {
     setActiveTaskId(null);
   };
 
-  
-  const stopSpeaking = () => {
-    if (window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-      setIsSpeaking(false);
+  const triggerPageClick = async (coords?: PointerPosition) => {
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tabs[0]?.id) return;
+      await chrome.tabs.sendMessage(tabs[0].id, {
+        type: 'EXECUTE_BROWSER_ACTION',
+        payload: {
+          action: {
+            type: 'click_element',
+            targetId: 'cursor',
+            x: coords?.x,
+            y: coords?.y,
+          }
+        },
+        action: {
+          type: 'click_element',
+          targetId: 'cursor',
+          x: coords?.x,
+          y: coords?.y,
+        }
+      });
+    } catch (err) {
+      console.warn('[PageClick] Error sending click to active tab:', err);
     }
   };
 
+  const handleHeadGesture = async (gesture: GestureType, pos?: PointerPosition) => {
+    setLastGesture(gesture);
+
+    if (gesture === 'shake') {
+      if (pendingApproval) {
+        await handleRejectAction();
+        setCurrentActionDescription('Head shake: Action rejected');
+      } else if (activeTaskId) {
+        await handleCancelTask();
+        setCurrentActionDescription('Head shake: Task cancelled');
+      } else if (isSpeaking) {
+        stopSpeaking();
+        setCurrentActionDescription('Head shake: Speech stopped');
+      } else {
+        setCurrentActionDescription('Head shake (Cancel)');
+      }
+      return;
+    }
+
+    if (gesture === 'nod') {
+      if (pendingApproval) {
+        await handleApproveAction();
+        setCurrentActionDescription('Head nod: Action approved');
+      } else {
+        await triggerPageClick(pos);
+        setCurrentActionDescription('Head nod: Click');
+      }
+      return;
+    }
+
+    if (gesture === 'double_blink') {
+      if (pendingApproval) {
+        await handleApproveAction();
+        setCurrentActionDescription('Blink: Action approved');
+      } else {
+        await triggerPageClick(pos);
+        setCurrentActionDescription('Double blink: Click');
+      }
+      return;
+    }
+
+    if (gesture === 'tab_left') {
+      const task = await defaultMockTaskMemoryStore.createTask('Head gesture: Previous Tab', voiceLanguage);
+      await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
+      setActiveTaskId(task.id);
+      await executeActionSafely({ type: 'switch_tab', direction: 'previous' }, task.id);
+      return;
+    }
+
+    if (gesture === 'tab_right') {
+      const task = await defaultMockTaskMemoryStore.createTask('Head gesture: Next Tab', voiceLanguage);
+      await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
+      setActiveTaskId(task.id);
+      await executeActionSafely({ type: 'switch_tab', direction: 'next' }, task.id);
+      return;
+    }
+
+    if (gesture === 'scroll_up') {
+      const task = await defaultMockTaskMemoryStore.createTask('Head gesture: Scroll Up', voiceLanguage);
+      await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
+      setActiveTaskId(task.id);
+      await executeActionSafely({ type: 'scroll_page', direction: 'up', amount: 500 }, task.id);
+      return;
+    }
+
+    if (gesture === 'scroll_down') {
+      const task = await defaultMockTaskMemoryStore.createTask('Head gesture: Scroll Down', voiceLanguage);
+      await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
+      setActiveTaskId(task.id);
+      await executeActionSafely({ type: 'scroll_page', direction: 'down', amount: 500 }, task.id);
+      return;
+    }
+
+    if (gesture === 'undo') {
+      const task = await defaultMockTaskMemoryStore.createTask('Head gesture: Undo', voiceLanguage);
+      await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
+      setActiveTaskId(task.id);
+      await executeActionSafely({ type: 'history_action', command: 'undo' }, task.id);
+      return;
+    }
+
+    if (gesture === 'redo') {
+      const task = await defaultMockTaskMemoryStore.createTask('Head gesture: Redo', voiceLanguage);
+      await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
+      setActiveTaskId(task.id);
+      await executeActionSafely({ type: 'history_action', command: 'redo' }, task.id);
+      return;
+    }
+  };
+
+  const handleHandGesture = async (gesture: Parameters<typeof actionForHandGesture>[0], pos?: PointerPosition) => {
+    setLastGesture(gesture);
+
+    if (gesture === 'shaka') {
+      await toggleListen();
+      setCurrentActionDescription(`Gesture recognized: shaka (toggled voice)`);
+      return;
+    }
+
+    if (gesture === 'thumbs_up' && pendingApproval) {
+      await handleApproveAction();
+      setCurrentActionDescription('Thumbs up: Action approved');
+      return;
+    }
+
+    if (gesture === 'thumbs_down' && pendingApproval) {
+      await handleRejectAction();
+      setCurrentActionDescription('Thumbs down: Action rejected');
+      return;
+    }
+
+    if (gesture === 'air_click' || gesture === 'pinch') {
+      if (pendingApproval) {
+        await handleApproveAction();
+        setCurrentActionDescription('Click: Action approved');
+      } else {
+        await triggerPageClick(pos);
+        setCurrentActionDescription(`Click gesture: ${gesture}`);
+      }
+      return;
+    }
+
+    const action = actionForHandGesture(gesture);
+    if (!action) {
+      setCurrentActionDescription(`Gesture recognized: ${gesture}`);
+      return;
+    }
+
+    const task = await defaultMockTaskMemoryStore.createTask(`Hand gesture: ${gesture}`, voiceLanguage);
+    await defaultMockTaskMemoryStore.updateTaskStatus(task.id, 'in_progress');
+    setActiveTaskId(task.id);
+    setTasks(await defaultMockTaskMemoryStore.listTasks());
+    await executeActionSafely(action, task.id);
+  };
+
+  useEffect(() => {
+    const unbindHand = handTracker.onTrackingEvent((event) => {
+      void handleHandGesture(event.gesture, event.position);
+    });
+    const unbindHead = headTracker.onTrackingEvent((event) => {
+      void handleHeadGesture(event.gesture, event.position);
+    });
+    return () => {
+      unbindHand();
+      unbindHead();
+    };
+  }, [voiceLanguage, approvalMode, pendingApproval, activeTaskId, isSpeaking]);
+
+  const stopSpeaking = () => {
+    void voicePipeline.stopSpeaking().catch(() => {});
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setIsSpeaking(false);
+  };
+
   const speakText = (text: string) => {
-    if (!window.speechSynthesis) return;
-    stopSpeaking();
-    const utterance = new SpeechSynthesisUtterance(text);
-    // Attempt to match the selected language
-    utterance.lang = voiceLanguage;
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
     setIsSpeaking(true);
-    window.speechSynthesis.speak(utterance);
+    voicePipeline.speak(text, voiceLanguage).catch(() => {
+      if (!window.speechSynthesis) {
+        setIsSpeaking(false);
+        return;
+      }
+      stopSpeaking();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = voiceLanguage;
+      utterance.onend = () => setIsSpeaking(false);
+      utterance.onerror = () => setIsSpeaking(false);
+      setIsSpeaking(true);
+      window.speechSynthesis.speak(utterance);
+    });
   };
 
   const handleReadPage = async () => {
@@ -576,15 +770,18 @@ export const Sidepanel: React.FC = () => {
       if (!tabs[0]?.id) throw new Error('No active tab found');
       const response = await chrome.tabs.sendMessage(tabs[0].id, { 
         type: 'EXECUTE_BROWSER_ACTION', 
+        payload: { action: { type: 'read_page' } },
         action: { type: 'read_page' } 
       });
-      if (response && response.success && response.data?.content) {
+      const pageText = response?.data?.text || response?.data?.content;
+      if (response && response.success && pageText) {
         setConversation(prev => [...prev, { role: 'user', text: 'Read this page' }]);
-        const reply = "I am reading the page: " + response.data.content.substring(0, 500) + "...";
+        const preview = pageText.length > 300 ? pageText.substring(0, 300) + '...' : pageText;
+        const reply = "I am reading the page: " + preview;
         setConversation(prev => [...prev, { role: 'assistant', text: reply }]);
-        speakText(response.data.content);
+        speakText(pageText);
       } else {
-        throw new Error('Failed to read page content');
+        throw new Error(response?.message || 'Failed to read page content');
       }
     } catch (err: any) {
        setConversation(prev => [...prev, { role: 'assistant', text: `Error reading page: ${err.message}` }]);
@@ -607,11 +804,24 @@ export const Sidepanel: React.FC = () => {
     }
 
     try {
-      await defaultMockAiClient.sendMessage(textToProcess, voiceLanguage);
-      const assistantReply = await defaultMockAiClient.sendMessage(textToProcess, voiceLanguage);
-      setConversation(prev => [...prev, {role: 'assistant', text: assistantReply.content}]);
-      speakText(assistantReply.content);
-      const plannedActions = await defaultMockAiClient.generatePlan(textToProcess, voiceLanguage);
+      let replyContent = '';
+      let plannedActions: BrowserAction[] = [];
+      const pageContext = await getActivePageContext();
+
+      try {
+        const backendRes = await defaultBackendAiClient.chat(textToProcess, voiceLanguage, undefined, pageContext);
+        replyContent = backendRes.reply;
+        plannedActions = backendRes.suggestedActions || [];
+      } catch {
+        // Fallback to local mock client if backend is not running or in test
+        const assistantReply = await defaultMockAiClient.sendMessage(textToProcess, voiceLanguage);
+        replyContent = assistantReply.content;
+        plannedActions = await defaultMockAiClient.generatePlan(textToProcess, voiceLanguage);
+      }
+
+      setConversation(prev => [...prev, {role: 'assistant', text: replyContent}]);
+      speakText(replyContent);
+
       const newTask = await defaultMockTaskMemoryStore.createTask(textToProcess, voiceLanguage);
       setActiveTaskId(newTask.id);
       
@@ -633,20 +843,13 @@ export const Sidepanel: React.FC = () => {
     }
   };
 
-  const handleCancelTask = async () => {
-    if (activeTaskId) {
-      await defaultMockTaskMemoryStore.updateTaskStatus(activeTaskId, 'cancelled');
-      const updatedTasks = await defaultMockTaskMemoryStore.listTasks();
-      setTasks(updatedTasks);
-      setActiveTaskId(null);
-      setAssistantState('idle');
-      setPendingApproval(null);
-    }
-  };
+
 
   const handleResumeTask = async (taskId: string) => {
     setActiveTaskId(taskId);
-    await defaultMockTaskMemoryStore.updateTaskStatus(taskId, 'in_progress');
+    await resumableTaskManager.resumeTask(taskId, defaultChromeActionExecutor).catch(async () => {
+      await defaultMockTaskMemoryStore.updateTaskStatus(taskId, 'in_progress');
+    });
     const updatedTasks = await defaultMockTaskMemoryStore.listTasks();
     setTasks(updatedTasks);
     setAssistantState('idle');
@@ -661,21 +864,49 @@ export const Sidepanel: React.FC = () => {
 
   const toggleListen = async () => {
     if (voiceState === 'listening') {
-      await voiceRecognizer.stopListening();
+      await voiceRecognizer.stopListening().catch(() => {});
+      await voicePipeline.stopListening().catch(() => {});
+      await livekitVoiceClient.disconnect().catch(() => {});
+      setVoiceState('idle');
       return;
     }
     try {
       setVoiceState('requesting');
       setVoiceError(null);
       setInputText('');
+
+      // Test microphone access in browser
+      if (navigator.mediaDevices?.getUserMedia) {
+        try {
+          const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          micStream.getTracks().forEach(t => t.stop());
+        } catch (permErr: any) {
+          console.warn('[Voice] Mic getUserMedia error:', permErr);
+          if (permErr.name === 'NotAllowedError' || permErr.name === 'PermissionDeniedError') {
+            setVoiceState('denied');
+            setVoiceError('Microphone permission denied. Grant access to use voice.');
+            if (typeof chrome !== 'undefined' && chrome.tabs?.create) {
+              chrome.tabs.create({ url: chrome.runtime.getURL('src/sidepanel/index.html?mic=request') });
+            }
+            return;
+          }
+        }
+      }
+
       await voiceRecognizer.startListening(voiceLanguage);
       setVoiceState('listening');
     } catch (err: any) {
-      if (err.message.includes('not supported')) {
+      if (err.message?.includes('not supported')) {
         setVoiceState('unsupported');
+      } else if (err.message?.includes('not-allowed') || err.name === 'NotAllowedError') {
+        setVoiceState('denied');
+        setVoiceError('Microphone permission blocked. Grant access to use voice.');
+        if (typeof chrome !== 'undefined' && chrome.tabs?.create) {
+          chrome.tabs.create({ url: chrome.runtime.getURL('src/sidepanel/index.html?mic=request') });
+        }
       } else {
         setVoiceState('error');
-        setVoiceError(err.message);
+        setVoiceError(err.message || 'Voice recognition failed');
       }
     }
   };
@@ -1090,7 +1321,7 @@ export const Sidepanel: React.FC = () => {
                        // Ensure content script is ready
                        try {
                          await chrome.tabs.sendMessage(tabId, { type: 'CONTENT_PING' });
-                       } catch (e) {
+                       } catch {
                          // Receiving end does not exist, try to inject
                          await chrome.scripting.executeScript({
                            target: { tabId },
@@ -1279,6 +1510,21 @@ export const Sidepanel: React.FC = () => {
                 </button>
              </div>
 
+             {voiceState === 'denied' && (
+               <div className="flex items-center justify-between p-2 rounded-xl bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800/40 text-[11px] text-red-600 dark:text-red-400">
+                 <span>Microphone permission required.</span>
+                 <button 
+                   onClick={() => {
+                     if (typeof chrome !== 'undefined' && chrome.tabs?.create) {
+                       chrome.tabs.create({ url: chrome.runtime.getURL('src/sidepanel/index.html?mic=request') });
+                     }
+                   }}
+                   className="px-2.5 py-1 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-700 transition shadow-sm"
+                 >
+                   Grant Access
+                 </button>
+               </div>
+             )}
              {voiceState === 'error' && voiceError && (
                <p className="text-[11px] text-red-500 font-medium">{voiceError}</p>
              )}

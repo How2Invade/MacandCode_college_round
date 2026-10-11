@@ -8,11 +8,18 @@
     "storage",
     "tabs",
     "activeTab",
-    "scripting"
+    "scripting",
+    "audioCapture",
+    "videoCapture"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "<all_urls>",
+    "http://localhost:4000/*",
+    "http://127.0.0.1:4000/*"
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
   "action": {
     "default_popup": "src/popup/index.html",
     "default_title": "Handsfree Assistant"
@@ -23,9 +30,6 @@
   "background": {
     "service_worker": "background.js",
     "type": "module"
-  },
-  "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
   "content_scripts": [
     {

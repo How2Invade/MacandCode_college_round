@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { defaultChromeActionExecutor } from '../../src/browser/chromeActionExecutor';
 import { Sidepanel } from '../../src/sidepanel/Sidepanel';
 import { defaultMockTaskMemoryStore } from '../../src/memory/mockTaskMemoryStore';
@@ -42,7 +42,7 @@ describe('Sidepanel React Component', () => {
       const testApprovalBtn = screen.getByText('Test Approval');
       fireEvent.click(testApprovalBtn);
       
-      await new Promise(r => setTimeout(r, 50));
+      expect(await screen.findByText(/confirm/i)).toBeInTheDocument();
       
       // Should not execute
       expect(executeSpy).not.toHaveBeenCalled();
@@ -59,21 +59,20 @@ describe('Sidepanel React Component', () => {
       
       // Trigger approval flow
       fireEvent.click(screen.getByText('Test Approval'));
-      await new Promise(r => setTimeout(r, 50));
       
       // Click confirm
       const confirmBtn = await screen.findByText(/confirm/i);
       fireEvent.click(confirmBtn);
-      await new Promise(r => setTimeout(r, 50));
-      require('fs').writeFileSync('dom.html', document.body.innerHTML);
       
       // Ensure APPROVE_ACTION was sent
-      expect(sendMessageSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'APPROVE_ACTION',
-          payload: expect.objectContaining({ action: expect.anything() })
-        })
-      );
+      await waitFor(() => {
+        expect(sendMessageSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'APPROVE_ACTION',
+            payload: expect.objectContaining({ action: expect.anything() })
+          })
+        );
+      });
       
       // Ensure it executed
       expect(executeSpy).toHaveBeenCalled();
@@ -105,11 +104,9 @@ describe('Sidepanel React Component', () => {
       render(<Sidepanel />);
       
       fireEvent.click(screen.getByText('Test Approval'));
-      await new Promise(r => setTimeout(r, 50));
       
       const confirmBtn = await screen.findByText(/confirm/i);
       fireEvent.click(confirmBtn);
-      await new Promise(r => setTimeout(r, 50));
       
       // Ensure error UI rendered (exclamation mark and message)
       expect(await screen.findByText(/Action blocked by safety policy/i)).toBeInTheDocument();
@@ -137,20 +134,20 @@ describe('Sidepanel React Component', () => {
       render(<Sidepanel />);
       
       fireEvent.click(screen.getByText('Test Approval'));
-      await new Promise(r => setTimeout(r, 50));
       
       // Click cancel
       const cancelBtns = await screen.findAllByText(/cancel/i);
       fireEvent.click(cancelBtns[1]); // the second one is the pending approval reject button
-      await new Promise(r => setTimeout(r, 50));
       
       // Ensure REJECT_ACTION was sent
-      expect(sendMessageSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'REJECT_ACTION',
-          payload: expect.objectContaining({ action: expect.anything() })
-        })
-      );
+      await waitFor(() => {
+        expect(sendMessageSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'REJECT_ACTION',
+            payload: expect.objectContaining({ action: expect.anything() })
+          })
+        );
+      });
       
       // The task block should have disappeared from main view because it's cancelled
       expect(await screen.findByText(/No active task/i)).toBeInTheDocument();
@@ -180,15 +177,16 @@ describe('Sidepanel React Component', () => {
       
       fireEvent.click(screen.getByText('Test Cursor'));
       
-      await new Promise(r => setTimeout(r, 2200));
+      await waitFor(() => {
+        expect(screen.getByText(/Test completed successfully/i)).toBeInTheDocument();
+      }, { timeout: 4000 });
       
       expect(executeScriptSpy).toHaveBeenCalledWith({ target: { tabId: 1 }, files: ['content.js'] });
       expect(sendMessageSpy).toHaveBeenCalledWith(1, expect.objectContaining({ type: 'CONTENT_PING' }));
       expect(sendMessageSpy).toHaveBeenCalledWith(1, expect.objectContaining({ type: 'POINTER_POSITION_UPDATE' }));
       
       // Success should be logged
-      expect(await screen.findByText(/Test Cursor Sequence/i)).toBeInTheDocument();
-      expect(await screen.findByText(/Test completed successfully/i)).toBeInTheDocument();
+      expect(screen.getByText(/Test Cursor Sequence/i)).toBeInTheDocument();
     });
 
     it('should show error if message delivery fails after injection', async () => {
@@ -198,8 +196,6 @@ describe('Sidepanel React Component', () => {
       
       render(<Sidepanel />);
       fireEvent.click(screen.getByText('Test Cursor'));
-      
-      await new Promise(r => setTimeout(r, 500));
       
       expect(await screen.findByText(/Failed: Message delivery failed or cursor hidden\. Debug:/i)).toBeInTheDocument();
     });

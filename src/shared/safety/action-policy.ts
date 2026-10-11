@@ -1,3 +1,4 @@
+
 /**
  * Action Safety, Validation & Approval Policy
  * Enforces Zod schema validation and human-in-the-loop policies for all BrowserActions.
@@ -80,7 +81,6 @@ export const BrowserActionSchema = z.discriminatedUnion('type', [
   NavigateForwardSchema,
   SwitchTabSchema,
   ReadPageSchema,
-  ZoomPageSchema,
   HistoryActionSchema,
 ]);
 
@@ -98,12 +98,16 @@ export type ActionValidationResult = ValidationSuccess | ValidationFailure;
 
 export function validateBrowserAction(action: unknown): ActionValidationResult {
   const result = BrowserActionSchema.safeParse(action);
+
   if (result.success) {
     return { isValid: true, action: result.data };
   }
+
   return {
     isValid: false,
-    errors: result.error.errors.map((e) => `${e.path.join('.') || 'root'}: ${e.message}`),
+    errors: result.error.errors.map(
+      (e) => `${e.path.join('.') || 'root'}: ${e.message}`
+    ),
   };
 }
 
@@ -130,7 +134,7 @@ const HIGH_RISK_KEYWORDS = [
 ];
 
 export class ActionPolicyEngine {
-  constructor(private defaultApprovalMode: ApprovalMode = 'ask') {}
+  constructor(private defaultApprovalMode: ApprovalMode = 'ask') { }
 
   public evaluate(
     action: BrowserAction,
@@ -143,7 +147,11 @@ export class ActionPolicyEngine {
     if (action.type === 'open_url') {
       try {
         const parsed = new URL(action.url);
-        if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost') {
+
+        if (
+          parsed.protocol !== 'https:' &&
+          parsed.hostname !== 'localhost'
+        ) {
           reasons.push('Insecure HTTP protocol');
           riskLevel = 'medium';
         }
@@ -156,10 +164,16 @@ export class ActionPolicyEngine {
     // 2. Inspect click_element targets
     if (action.type === 'click_element') {
       const lowerTarget = action.targetId.toLowerCase();
+
       for (const keyword of HIGH_RISK_KEYWORDS) {
         if (lowerTarget.includes(keyword)) {
           reasons.push(`Target ID matches high-risk pattern: "${keyword}"`);
-          riskLevel = keyword === 'pay' || keyword === 'checkout' || keyword === 'delete' ? 'critical' : 'high';
+          riskLevel =
+            keyword === 'pay' ||
+              keyword === 'checkout' ||
+              keyword === 'delete'
+              ? 'critical'
+              : 'high';
           break;
         }
       }
@@ -167,21 +181,34 @@ export class ActionPolicyEngine {
 
     // 3. Inspect type_text
     if (action.type === 'type_text') {
+      riskLevel = 'medium';
+      reasons.push('Entering text can modify or submit user data');
+
       if (action.targetId) {
         const lower = action.targetId.toLowerCase();
-        if (lower.includes('password') || lower.includes('cvv') || lower.includes('card')) {
-          reasons.push('Text input targets sensitive credential or financial field');
+
+        if (
+          lower.includes('password') ||
+          lower.includes('cvv') ||
+          lower.includes('card')
+        ) {
+          reasons.push(
+            'Text input targets sensitive credential or financial field'
+          );
           riskLevel = 'critical';
         }
       }
     }
 
-    // In 'ask' mode, actions with medium risk or above (or any modification) require approval.
-    // In 'auto' mode, only high/critical risk operations require explicit approval.
+    // Ask mode: require approval for risky actions, clicks, and typing.
+    // Auto mode: only low-risk actions may proceed without approval.
     const requiresApproval =
       mode === 'ask'
-        ? riskLevel !== 'low' || (action.type === 'click_element' && action.targetId !== 'cursor') || action.type === 'type_text'
-        : riskLevel === 'high' || riskLevel === 'critical';
+        ? riskLevel !== 'low' ||
+        (action.type === 'click_element' &&
+          action.targetId !== 'cursor') ||
+        action.type === 'type_text'
+        : riskLevel !== 'low';
 
     return {
       requiresApproval,
@@ -197,9 +224,11 @@ export class ActionPolicyEngine {
     userApproved: boolean
   ): boolean {
     const decision = this.evaluate(action, approvalMode);
+
     if (!decision.requiresApproval) {
       return true;
     }
+
     return userApproved;
   }
 }

@@ -139,7 +139,8 @@ export class GestureDetector {
     const thumb = landmarks[LANDMARK.THUMB_TIP];
 
     
-    const isThumbExt = this.isFingerExtended(landmarks, LANDMARK.THUMB_TIP, LANDMARK.THUMB_IP);
+    const isThumbExt = this.isFingerExtended(landmarks, LANDMARK.THUMB_TIP, LANDMARK.THUMB_MCP) ||
+      this.dist2D(landmarks[LANDMARK.THUMB_TIP], landmarks[LANDMARK.INDEX_MCP]) > palmWidth * 0.75;
     const isIndexExt = this.isFingerExtended(landmarks, LANDMARK.INDEX_TIP, LANDMARK.INDEX_MCP);
     const isMiddleExt = this.isFingerExtended(landmarks, LANDMARK.MIDDLE_TIP, LANDMARK.MIDDLE_MCP);
     const isRingExt = this.isFingerExtended(landmarks, LANDMARK.RING_TIP, LANDMARK.RING_MCP);
